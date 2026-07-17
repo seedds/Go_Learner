@@ -128,13 +128,14 @@ targets:
     sources:
       - path: GoLearner
       - path: Engine/Bridge
-        # The new GTP bridge (KataGoGTP) belongs to the full-engine targets
-        # (EngineHost / EngineSmokeTests), not the legacy app, which still links
-        # the Engine/cpp slice. It gets wired into the app at T4.
+        # The new GTP bridge + its in-process transport belong to the full-engine
+        # targets (EngineHost), not the legacy app, which still links the
+        # Engine/cpp slice. They get wired into the app at T4.
         excludes:
           - "KataGoGTP.h"
           - "KataGoGTP.mm"
           - "KataGoEngine-Bridging-Header.h"
+          - "InProcessKataGoEngine.swift"
       - path: Engine/cpp
         # Headers + .cpp compiled into the app; json.hpp is header-only.
       - path: Resources/KataGoModel19x19fp16.mlpackage
@@ -169,6 +170,13 @@ targets:
       - path: EngineHost
       - path: Engine/Bridge/KataGoGTP.h
       - path: Engine/Bridge/KataGoGTP.mm
+      - path: Engine/Bridge/InProcessKataGoEngine.swift
+      # Shared pure Swift seam (also compiled into the app); the hosted smoke
+      # tests reach these through `@testable import EngineHost`.
+      - path: GoLearner/KataGoEngineIO.swift
+      - path: GoLearner/GtpCommandBuilder.swift
+      - path: GoLearner/GtpAnalysisParser.swift
+      - path: GoLearner/GameSession.swift
       - path: Resources/default_model.bin.gz
         buildPhase: resources
       - path: Resources/default_gtp.cfg
@@ -185,6 +193,8 @@ targets:
         SWIFT_OBJC_BRIDGING_HEADER: "Engine/Bridge/KataGoEngine-Bridging-Header.h"
         SWIFT_OBJC_INTEROP_MODE: objcxx
         CLANG_CXX_LANGUAGE_STANDARD: "gnu++17"
+        # Let the hosted smoke tests reach the seam via @testable import EngineHost.
+        ENABLE_TESTABILITY: YES
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         HEADER_SEARCH_PATHS:
@@ -196,7 +206,8 @@ targets:
           - "OS_IS_IOS=1"
           - "COMPILE_MAX_BOARD_LEN=37"
 
-  # T2 gate: hosted by EngineHost so inference runs in a real app process.
+  # T2 + T3 gate: hosted by EngineHost so inference runs in a real app process.
+  # Reaches the engine seam via `@testable import EngineHost`.
   EngineSmokeTests:
     type: bundle.unit-test
     platform: iOS
@@ -207,14 +218,12 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.golearner.enginesmoke
-        SWIFT_OBJC_BRIDGING_HEADER: "Engine/Bridge/KataGoEngine-Bridging-Header.h"
+        # @testable import of the objcxx EngineHost module requires the test
+        # compilation to also enable Swift/C++ interop.
         SWIFT_OBJC_INTEROP_MODE: objcxx
         GENERATE_INFOPLIST_FILE: YES
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/EngineHost.app/EngineHost"
         BUNDLE_LOADER: "$(TEST_HOST)"
-        HEADER_SEARCH_PATHS:
-          - "$(SRCROOT)/Engine/katago/cpp"
-          - "$(SRCROOT)/Engine/katago/cpp/core"
 
   GoLearnerTests:
     type: bundle.unit-test
@@ -229,12 +238,16 @@ targets:
           - "KataGoGTP.h"
           - "KataGoGTP.mm"
           - "KataGoEngine-Bridging-Header.h"
+          - "InProcessKataGoEngine.swift"
       - path: Engine/cpp
       # Search + its value types (no CoreML dependency).
       - path: GoLearner/NNResult.swift
       - path: GoLearner/MCTS.swift
       # Pure SGF codec (Foundation + GoColor only).
       - path: GoLearner/SGF.swift
+      # Pure GTP command builder + kata-analyze parser (Foundation only).
+      - path: GoLearner/GtpCommandBuilder.swift
+      - path: GoLearner/GtpAnalysisParser.swift
       # Fixed handicap placement table (Foundation + SGFPoint only).
       - path: GoLearner/HandicapPoints.swift
       # SGF → board replay (uses the bridge, no CoreML).
