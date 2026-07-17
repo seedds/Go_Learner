@@ -4,9 +4,12 @@ Operational guide for AI coding agents. Read this first, then
 [ARCHITECTURE.md](ARCHITECTURE.md) for the deep model. [README.md](README.md)
 is the human-facing overview.
 
-**One-liner:** iPhone (iOS 26, SwiftUI) Go app that runs the KataGo
-`b18c384nbt` net on the Apple Neural Engine via Core ML. A vendored slice of
-KataGo's C++ (rules + NN feature generation) is bridged to Swift with ObjC++.
+**One-liner:** iPhone (iOS 26, SwiftUI) Go app that runs the **full vendored
+KataGo engine in-process over GTP**. The engine's `b18c384nbt` net runs on the
+Apple Neural Engine (CoreML) — with an MLX/GPU path on device — converted from
+`.bin.gz` at launch. Swift drives the engine through a thin ObjC++ GTP bridge;
+board/review/GIF rendering replays moves through a separate stateless rules
+bridge (`GoReplay`).
 
 ---
 
@@ -23,7 +26,8 @@ xcodegen generate
 xcodebuild build -project GoLearner.xcodeproj -scheme GoLearner \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro' -configuration Debug
 
-# 3. Test (6 bridge unit tests; the scheme's test action runs GoLearnerTests)
+# 3. Test (host-based GoLearnerTests: pure parsers/SGF/replay + a live-engine
+#    smoke test)
 xcodebuild test -project GoLearner.xcodeproj -scheme GoLearner \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro'
 ```
@@ -31,65 +35,82 @@ xcodebuild test -project GoLearner.xcodeproj -scheme GoLearner \
 Filter noisy output with:
 `... 2>&1 | grep -iE 'error:|BUILD SUCCEEDED|BUILD FAILED|Test Case.*(passed|failed)|Executed [0-9]'`
 
+**First build is slow & needs the Metal Toolchain** (MLX compiles Metal kernels):
+`xcodebuild -downloadComponent MetalToolchain` once, if you see
+`cannot execute tool 'metal'`.
+
 ### Fast C++ iteration (skip Xcode)
-The engine subset compiles standalone on the host — use this to shake out C++
-errors in seconds before a full build:
+The vendored engine compiles standalone on the host — shake out C++ errors in
+seconds before a full build (most engine TUs need only the core/game/neuralnet
+headers; the MLX backend needs the framework's generated Swift header, so build
+those in Xcode):
 ```bash
-cd Engine/cpp
-clang++ -std=gnu++17 -c -I. -I core -I game -I neuralnet \
-  -DNO_GIT_REVISION -DOS_IS_IOS <file>.cpp -o /dev/null
+cd Engine/katago/cpp
+SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
+clang++ -std=gnu++17 -c -I. -Icore -Igame -Ineuralnet -Isearch -Iprogram \
+  -Ibook -Idataio -Iexternal -Iexternal/nlohmann_json \
+  -DNO_GIT_REVISION -DOS_IS_IOS -DCOMPILE_MAX_BOARD_LEN=37 \
+  -isysroot "$SDK" -arch arm64 -mios-simulator-version-min=26.0 -w \
+  <file>.cpp -o /dev/null
 ```
 
-### Runtime end-to-end check (Core ML on ANE)
-DEBUG builds log a one-time self-check at launch. After install+launch in the sim:
+### Runtime end-to-end check
+DEBUG builds log a one-time self-check at launch. After the app runs in the sim:
 ```bash
 xcrun simctl spawn "iPhone 17 Pro" log show --last 3m \
-  --predicate 'process == "GoLearner"' --info --debug --style compact \
-  2>&1 | grep selfCheck
-# Expect: selfCheck OK: policyCount=361 bestMove=(<corner>) ... whiteLead≈+1
+  --predicate 'process == "GoLearner"' --info --debug 2>&1 | grep selfCheck
+# Expect: GoLearner selfCheck genmove=Q16 (15,3)   ← a 3-4 corner point
 ```
-A **corner** best-move on the empty board is the signal that features+model+decode
-are correct. Garbage moves (tengen/first line) ⇒ a feature-encoding regression.
+A **corner / star-point** opening on the empty board is the signal that model
+load + CoreML conversion + inference + GTP decode are correct. Tengen/first-line
+garbage ⇒ a feature-encoding or decode regression.
 
 ---
 
 ## Hard constraints (do not violate)
 
-1. **`GoBridge` (C++) is single-threaded, main-actor only.** Never call it from
-   the `GoEngine` actor. Pattern: `GameState` (main actor) fills `[Float]`
-   buffers from the bridge, then passes those value types to the engine.
-2. **Regenerate after file changes.** `project.yml` globs `GoLearner/`,
-   `Engine/Bridge/`, `Engine/cpp/`. A new `.swift`/`.cpp`/`.mm` won't be built
-   until you re-run `xcodegen generate`.
-3. **Keep Core ML on `.cpuAndNeuralEngine`** (`NNModel.init`). The simulator's
-   Metal/GPU path is unreliable.
-4. **Keep the C++ subset minimal.** Only add engine files if a needed symbol is
-   missing; every added `.cpp` must compile with the flags above. Don't pull in
-   GPU/MLX/OpenCL/search code.
-5. **Decode math mirrors KataGo `nneval.cpp`.** If you touch `NNModel.decode`,
-   preserve the exact steps/constants (`scoreMeanMultiplier=20`, White-perspective
-   sign flip, legal-move masking). See ARCHITECTURE.md §2.3.
-6. **Model I/O names are fixed:** inputs `input_spatial [1,22,19,19]`,
-   `input_global [1,19]`; outputs `output_policy` (use **channel 0**), `out_value`,
-   `out_miscvalue`, `out_ownership`. No `input_meta` (meta encoder v0).
+1. **One engine per process.** The KataGo engine and its GTP stdin/stdout stream
+   buffers are process-global. Drive it only through `GameSession` over a single
+   `KataGoEngineIO`. Never spin up a second reader (it deadlocks on the shared
+   output). `GameState` suppresses engine launch under XCTest so the test owns it.
+2. **The engine GTP loop needs a 1 MB thread stack.** `ScoreValue::initTables()`
+   overflows the default 512 KB stack and SIGSEGVs. `InProcessKataGoEngine` sets
+   `thread.stackSize = 4096 * 256` — keep it.
+3. **Simulator = CoreML/CPU; device = GPU+ANE mux.** MLX GPU inference crashes in
+   the simulator's Metal translation layer, and the sim has no ANE, so CoreML is
+   pinned to `.cpuOnly` there (`KataGoSwift/metalbackend.swift`,
+   `#if targetEnvironment(simulator)`), and device assignments are `[100]` (ANE)
+   in the sim vs `[0,100]` (GPU+ANE) on device (`InProcessKataGoEngine`).
+4. **`GoReplay` is the offline board authority; the engine is the live-game
+   authority.** Rendering, review navigation, GIF frames, and library thumbnails
+   replay the Swift move-list through `GoReplay` (stateless, KataGo rules, no
+   engine). Never route offline replay through the single engine.
+5. **Regenerate after file changes.** `project.yml` globs `GoLearner/`,
+   `Engine/Bridge/`, `Engine/katago/cpp/`, `Engine/katago/KataGoSwift/`. A new
+   source won't build until you re-run `xcodegen generate`.
+6. **Don't re-globify the vendored external trees.** `abseil-cpp-20260107/` and
+   `protobuf-34/` are pruned to exactly the reference's compile manifest; their
+   dir names must NOT end in `.N` (xcodegen mis-types `foo.1` as a man page and
+   drops the whole tree). If you re-vendor, prune to the manifest and keep the
+   suffix off.
 
 ## Traps already discovered (don't rediscover)
 
-- **Zobrist init timing:** KataGo asserts `IS_ZOBRIST_INITALIZED` inside the
-  `Board` constructor. C++ ivars construct at `+alloc`, *before* `-init` runs, so
-  `ScoreValue::initTables()` + `Board::initHash()` are done in `GoBridge`'s
-  `+initialize` (before the class's first message). Keep them there.
-- **Turn order is enforced** by `BoardHistory::isLegal` (can't play same color
-  twice). Always play as `sideToMove`.
+- **Zobrist init:** `Board::initHash()` is `call_once`-guarded, so both the
+  engine (`MainCmds::gtp`) and `GoReplay` may call it. `GoReplay` does NOT call
+  `ScoreValue::initTables()` (replay needs only rules), avoiding the single-init
+  assertion clashing with the engine.
 - **Capture-count fields are inverted vs their names:** Black's prisoners =
-  `board.numWhiteCaptures`. Handled in `GoBridge.mm` — don't "fix" it.
-- **No native undo:** `GoBridge undo` replays all-but-last move.
-- **ObjC→Swift name splitting:** the color getter is pinned with
-  `NS_SWIFT_NAME(stoneColor(atX:y:))` because the importer mis-splits
-  `...AtX:y:`. Add `NS_SWIFT_NAME` to any new ambiguous selector.
-- **Tests are a standalone logic bundle** (no app host): they compile the
-  bridge + C++ subset themselves, so **no `@testable import GoLearner`** (it
-  would duplicate the `GoBridge` ObjC class).
+  `board.numWhiteCaptures`. Handled in `GoReplay.mm` — don't "fix" it.
+- **GTP vertex mapping:** columns skip `I`; rows count from the bottom. Board
+  coords are 0-indexed with y from the top. See `GtpCommandBuilder.vertex`.
+- **kata-analyze winrate/scoreLead are White-perspective** (shipped cfg). Convert
+  to side-to-move in `GameState.nnResult(from:)`.
+- **default_gtp.cfg has `humanSL*` stripped:** no human-SL net is bundled, and
+  the engine throws in `Setup::loadParams` if those keys are present without it.
+- **Tests are host-based** now (`@testable import GoLearner`, hosted by the app),
+  so the engine's CoreML inference runs in a real app process (a hostless bundle
+  crashes the NN-server threads).
 
 ---
 
@@ -98,27 +119,32 @@ are correct. Garbage moves (tengen/first line) ⇒ a feature-encoding regression
 | Task | File(s) |
 |------|---------|
 | Game logic / engine driving / state | `GoLearner/GameState.swift` (`@MainActor @Observable`) |
-| Core ML load + I/O + decode | `GoLearner/NNModel.swift` |
-| Off-main-thread inference | `GoLearner/GoEngine.swift` (`actor`) |
-| Swift ⇄ C++ seam | `Engine/Bridge/GoBridge.{h,mm}` |
-| Rules + NN features (C++) | `Engine/cpp/{game,neuralnet,core}/` |
+| GTP request/response coordination | `GoLearner/GameSession.swift` (`actor`) |
+| GTP transport protocol / in-proc impl | `GoLearner/KataGoEngineIO.swift`, `Engine/Bridge/InProcessKataGoEngine.swift` |
+| GTP command strings / analyze parser | `GoLearner/GtpCommandBuilder.swift`, `GoLearner/GtpAnalysisParser.swift` |
+| Swift ⇄ engine GTP bridge (ObjC++) | `Engine/Bridge/KataGoGTP.{h,mm}` |
+| Stateless board replay (ObjC++/Swift) | `Engine/Bridge/GoReplay.{h,mm}`, `GoLearner/GoReplayKit.swift` |
+| CoreML/ANE + MLX/GPU backend (Swift) | `Engine/katago/KataGoSwift/metalbackend.swift` |
+| Vendored KataGo engine (C++) | `Engine/katago/cpp/**` (pin in `Engine/katago/UPSTREAM.txt`) |
 | Board UI + input | `GoLearner/BoardView.swift` |
 | Analysis overlay | `GoLearner/AnalysisOverlay.swift` |
 | Project definition | `project.yml` (→ `xcodegen`) |
-| Tests | `GoLearnerTests/GoBridgeTests.swift` |
+| Tests | `GoLearnerTests/` (host-based) |
 
 ## Definition of done (any change)
 1. `xcodegen generate` (if files/settings changed).
 2. Build succeeds (command 2).
 3. `xcodebuild test` green (command 3).
-4. For engine/feature/decode changes: launch in sim, confirm `selfCheck OK`
-   with a corner best-move.
+4. For engine/feature changes: launch in sim, confirm the `selfCheck` genmove is
+   a corner/star-point.
 
 ## Conventions
-- Match KataGo semantics exactly for anything touching rules/features/decode;
-  cite the upstream source location in a comment when non-obvious.
-- Keep changes surgical; don't refactor the vendored C++.
-- Prefer extending the `GoEngine`/`NNResult` seam over widening the bridge.
-- MVP intentionally excludes MCTS, SGF, multi-size, iCloud — see ARCHITECTURE.md
-  §6 before adding; keep the `GameState` API stable when you do.
-```
+- Match KataGo semantics exactly for anything touching rules/GTP; cite the
+  upstream source location in a comment when non-obvious.
+- Keep changes surgical; don't refactor the vendored C++/Swift under
+  `Engine/katago/`.
+- Prefer extending the `GameSession`/`NNResult` seam over widening the ObjC++
+  bridges.
+- Post-P0 roadmap (downloadable nets, human-SL profiles, GTP console, photo
+  import, sub-19 boards) is in [ROADMAP.md](ROADMAP.md); keep the `GameState`
+  API stable when adding.

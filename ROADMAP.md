@@ -7,22 +7,25 @@ a GTP console, and import/sharing tools.
 
 Status legend: ✅ done · 🔸 partial · ⏳ deferred · ⬜ not started.
 
-## Current status (updated after Phase 1)
-Phase 1 was implemented **ahead of P0 on the current architecture** (GoBridge +
-MCTS), since its user-facing value doesn't require the engine pivot. The GTP /
-native-SGF *internals* named in the original Phase 1 wording are swapped in
-later when P0 lands; the features themselves already ship.
+## Current status (updated after P0)
+**P0 landed: the app now runs the full vendored KataGo engine in-process over
+GTP** (MLX/GPU + CoreML/ANE mux, on-the-fly `.bin.gz`→CoreML conversion). This
+merged the originally-separate R3 (MLX backend) and R1 (CoreML conversion) work
+into the pivot, and retired the old GoBridge + MCTS + NNModel slice. Phase 1
+features were reimplemented on the new seam (native GTP play/analysis; board,
+review, GIF, thumbnails via the stateless `GoReplay` rules bridge).
 
+- ✅ **P0** full KataGo engine + in-process GTP seam (incl. R3 MLX + R1 CoreML conversion)
 - ✅ **A1** move navigation + win-rate bar
-- ✅ **A2** SGF import/export (custom Swift codec)
+- ✅ **A2** SGF import/export (custom Swift codec; native `loadsgf`/`printsgf` available post-P0)
 - ✅ **A3** local game library (SwiftData) + autosave
 - 🔸 **A4a** rules/komi + player assignment + New Game sheet (19×19 only)
-- ⏳ **A4b** sub-19 board sizes — see note below
+- ⏳ **A4b** sub-19 board sizes — now unblocked (engine masks natively via `rectangular_boardsize`)
 - ✅ **handicap** — fixed placement + SGF `AB`/`HA`/`PL` round-trip
-- ✅ **R7** GIF export (P0-independent)
+- ✅ **R7** GIF export
 
-Test suite: **52 tests, 0 failures**; runtime `selfCheck OK` (corner best-move)
-verified after A3 and A4a.
+Test suite: **41 tests, 0 failures** (host-based; incl. a live-engine smoke
+test); runtime self-check `genmove=Q16 (15,3)` (3-4 corner) verified in the sim.
 
 ### Deviations discovered during implementation
 - **A4 split (a/b).** The bundled Core ML model input is hard-pinned to
@@ -68,17 +71,21 @@ R7 GIF export ← A1     R6 photo import (engine-independent)
 
 ---
 
-## Phase 0 — Engine pivot  ⚑ keystone
-**P0. Full KataGo engine + in-process GTP seam.**
-- Vendor KataGo `cpp/` (`command/`, `search/`, `game/`, `neuralnet/`, `core/`).
-- Compile CoreML/ANE + MLX/GPU backends (`USE_MLX_BACKEND`); Simulator → CoreML.
-- Add a `KataGoEngineIO`-style protocol driven by `GameSession`; repoint
-  `GameState` at it. Retire `MCTS.swift` and `NNModel.decode` (engine owns
-  search + `nneval` now).
-- **Complexity:** high. **Risk:** build size, ANE/MLX parity. **Gate:** empty-
-  board corner best-move + sane winrate via GTP `kata-analyze`.
-- **Files:** `Engine/cpp/**` (expanded), new `GameSession.swift`,
-  `KataGoEngine.swift`; `GameState.swift`, `project.yml`, `ARCHITECTURE.md`.
+## Phase 0 — Engine pivot  ⚑ keystone  ✅ DONE
+**P0. Full KataGo engine + in-process GTP seam.** *(shipped; absorbed R3 + R1.)*
+- ✅ Vendored KataGo `cpp/` (`command/gtp`, `search/`, `game/`, `neuralnet/`,
+  `core/`, `dataio/`, `program/`, `book/`) + the abseil/protobuf/katagocoreml
+  subset + `mlx-swift` fork + the `KataGoSwift` interop framework, pruned to the
+  reference's exact compile manifest. Pin: `Engine/katago/UPSTREAM.txt`.
+- ✅ Compiled the MLX backend (`USE_MLX_BACKEND`) with the CoreML/ANE mux;
+  Simulator pinned to CoreML `.cpuOnly`, device runs the GPU+ANE mux.
+- ✅ `KataGoEngineIO` + `GameSession` + `GtpCommandBuilder`/`GtpAnalysisParser`;
+  `GameState` repointed at the engine; `MCTS`/`NNModel`/`GoEngine`/`GoBridge`
+  and the old `Engine/cpp` slice retired. Offline replay via `GoReplay`.
+- **Gate met:** empty-board `genmove=Q16` (3-4 corner) + parsed `kata-analyze`.
+- **Files:** `Engine/katago/**`, `Engine/Bridge/{KataGoGTP,GoReplay,GoTypes,
+  InProcessKataGoEngine}`, `GoLearner/{GameSession,GtpCommandBuilder,
+  GtpAnalysisParser,KataGoEngineIO,GoReplayKit,GameState}.swift`, `project.yml`.
 
 ## Phase 1 — Review, persistence, setup
 Implemented on the current architecture (no P0 dependency).
@@ -100,18 +107,19 @@ Implemented on the current architecture (no P0 dependency).
 ## Phase 2 — Models
 - **R2. Downloadable networks** — catalog (b40c768, FD3, 9x9, Lionffen, …),
   `URLSession` download w/ progress, on-disk store, model picker. `.bin.gz`
-  loads natively (no conversion for the MLX path). *(med)*
-- **R1. On-the-fly CoreML conversion** — port the reference Swift converter +
-  `coremlbackend` so the ANE path also runs downloaded nets; compiled-model
-  cache + clear-cache UI. Optional once MLX runs `.bin.gz` directly. *(high)*
+  loads natively; point `InProcessKataGoEngine.launch` at the chosen path. *(med)*
+- ✅ **R1. On-the-fly CoreML conversion** — landed with P0 (the vendored
+  `katagocoreml` converts `.bin.gz`→CoreML at launch). Still open: the persistent
+  compiled-model **cache** + clear-cache UI (reference's `CoreMLCacheKit`). *(low)*
 
 ## Phase 3 — Inference & strength
-- **R3. MLX/GPU backend + GPU+ANE mux** — vendor `mlxbackend.cpp` + MLX;
-  per-model backend picker (MLX / CoreML / GPU+ANE), search-thread + Winograd
-  tuning. *(high)*
-- **R5. Human SL net + rank/pro profiles** — meta encoder is in-tree post-P0;
-  add the second `input_meta` model (via R2/R1), rank (20k–9d) + Pro profiles
-  with fixed-visit budgets. *(high, revises #6)*
+- ✅ **R3. MLX/GPU backend + GPU+ANE mux** — landed with P0 (`mlxbackend.cpp` +
+  the vendored `mlx-swift`; device runs the `[0,100]` GPU+ANE mux). Still open: a
+  per-model backend **picker** UI + Winograd tuning controls. *(remaining: low)*
+- **R5. Human SL net + rank/pro profiles** — the meta encoder is in-tree; add the
+  second `input_meta` human net (via R2), restore the `humanSL*` cfg keys, and add
+  rank (20k–9d) + Pro profiles with fixed-visit budgets in `GtpCommandBuilder`.
+  *(high)*
 
 ## Phase 4 — Tools & sharing
 - **R4. GTP console** — Developer-mode raw command console over the native GTP
@@ -124,12 +132,12 @@ Implemented on the current architecture (no P0 dependency).
 ---
 
 ## Recommended sequence
-Original plan: `P0 → A1 → A2 → A3 → A4 → R2 → R3 → R5 → R4 → R7 → R6 → R1`
+Shipped: `A1 → A2 → A3 → A4a → handicap → R7` (on the old arch) → **P0** (engine
+pivot, which also delivered R3 + R1's converter).
 
-Revised after Phase 1 (Phase 1 shipped first, on current arch):
-`A1 → A2 → A3 → A4a → handicap → R7` ✅ → **next candidate without P0:** `R6`
-(photo import); `A4b` best deferred until **P0** (full engine masks natively) →
-then **P0** unlocks `R2 → R3 → R5 → R4 → R1`.
+Remaining, recommended order:
+`A4b (sub-19, now unblocked) → R2 (downloadable nets) → R1-cache → R4 (GTP
+console, nearly free) → R5 (human-SL profiles) → R6 (photo import) → R3-picker`.
 
 ## Explicitly deferred
 iCloud/CloudKit sync, Watch/TV/Mac/Vision targets, widgets, opening books,
