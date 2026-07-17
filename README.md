@@ -7,10 +7,12 @@ Play against a strong AI, watch it analyze the position live (win rate, score
 lead, territory ownership, candidate moves), and step through your game — all
 on-device, offline.
 
-> Status: **MVP in progress.** All Swift + C++ + bridge code is written and the
-> C++ engine subset is verified compiling & running on the host. The Xcode
-> project generation and on-simulator build are the next step (see
-> [Build](#build)).
+> Status: **MVP shipped + Phase 1 done.** Builds and runs on the iOS 26
+> simulator (runtime `selfCheck OK`, 52 tests green). Beyond the MVP it now has
+> MCTS search, move navigation, SGF import/export, a SwiftData game library,
+> rules/komi/player setup, handicap, and GIF export. See
+> [ROADMAP.md](ROADMAP.md) for what's next (P0 engine pivot, downloadable nets,
+> MLX, photo import).
 
 ---
 
@@ -40,11 +42,18 @@ keeps everything else small and modern SwiftUI.
   moves with probabilities.
 - Pass, undo, new game.
 
-### Deliberately **not** in the MVP (easy follow-ups)
+### Beyond the MVP
 
-- MCTS search (the engine seam is built to accept it later).
-- Multiple board sizes / rule editing.
-- SGF import/export, game library, iCloud sync.
+Shipped in Phase 1 (see [ROADMAP.md](ROADMAP.md)): MCTS search, move
+navigation + win-rate bar, SGF import/export, SwiftData game library,
+rules/komi + player setup, handicap, and GIF export.
+
+Still not present:
+
+- Multiple board sizes (9×9 / 13×13) — deferred to the P0 engine pivot.
+- Downloadable networks, MLX/GPU backend, human-style play, GTP console,
+  photo import — the post-P0 roadmap.
+- iCloud sync.
 - Learning features (tsumego, guided "why this move") — the namesake direction.
 
 ---
@@ -83,7 +92,7 @@ See **[ARCHITECTURE.md](ARCHITECTURE.md)** for the full map.
 GoLearner/
 ├── README.md                     ← you are here
 ├── ARCHITECTURE.md               ← deep dive for developers / AI agents
-├── project.yml                   ← XcodeGen spec (generates the .xcodeproj)   [pending]
+├── project.yml                   ← XcodeGen spec (generates the .xcodeproj)
 ├── Resources/
 │   └── KataGoModel19x19fp16.mlpackage   ← bundled Core ML net (~55 MB fp16)
 ├── Engine/
