@@ -1,0 +1,83 @@
+name: GoLearner
+options:
+  bundleIdPrefix: com.golearner
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    CLANG_CXX_LANGUAGE_STANDARD: "gnu++17"
+    CLANG_CXX_LIBRARY: "libc++"
+    # Vendored KataGo C++ subset needs these on the header search path and the
+    # same preprocessor defines used to verify it compiles (see ARCHITECTURE.md).
+    HEADER_SEARCH_PATHS:
+      - "$(SRCROOT)/Engine/cpp"
+      - "$(SRCROOT)/Engine/cpp/core"
+      - "$(SRCROOT)/Engine/cpp/game"
+      - "$(SRCROOT)/Engine/cpp/neuralnet"
+    GCC_PREPROCESSOR_DEFINITIONS:
+      - "$(inherited)"
+      - "NO_GIT_REVISION=1"
+      - "OS_IS_IOS=1"
+    # The engine subset has upstream warnings (e.g. deprecated sprintf); don't
+    # let them fail the build.
+    GCC_WARN_INHIBIT_ALL_WARNINGS: YES
+
+targets:
+  GoLearner:
+    type: application
+    platform: iOS
+    sources:
+      - path: GoLearner
+      - path: Engine/Bridge
+      - path: Engine/cpp
+        # Headers + .cpp compiled into the app; json.hpp is header-only.
+      - path: Resources/KataGoModel19x19fp16.mlpackage
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.golearner.app
+        SWIFT_OBJC_BRIDGING_HEADER: "Engine/Bridge/GoLearner-Bridging-Header.h"
+        # We load the model via the generic MLModel API by URL, so we don't need
+        # (or want) an auto-generated Swift wrapper class.
+        COREML_CODEGEN_LANGUAGE: "None"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        MARKETING_VERSION: "0.1"
+        CURRENT_PROJECT_VERSION: "1"
+
+  GoLearnerTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: GoLearnerTests
+      # Standalone logic bundle (no test host) that compiles the bridge + C++
+      # subset itself, so it can exercise the correctness-critical engine path
+      # directly without a duplicate-class clash against the app host.
+      - path: Engine/Bridge
+      - path: Engine/cpp
+      # Search + its value types (no CoreML dependency).
+      - path: GoLearner/NNResult.swift
+      - path: GoLearner/MCTS.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.golearner.tests
+        SWIFT_OBJC_BRIDGING_HEADER: "Engine/Bridge/GoLearner-Bridging-Header.h"
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  GoLearner:
+    build:
+      targets:
+        GoLearner: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - GoLearnerTests
