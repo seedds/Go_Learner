@@ -429,7 +429,14 @@ public func createCoreMLComputeHandle(
     // Load Core ML model (already converted by C++ katagocoreml library)
     do {
         let config = MLModelConfiguration()
+        // GoLearner simulator-compat patch: the iOS Simulator has no Apple
+        // Neural Engine and its CoreML emulation SIGSEGVs during inference when
+        // the ANE is allowed. Pin to CPU there; real devices keep CPU+ANE.
+        #if targetEnvironment(simulator)
+        config.computeUnits = .cpuOnly
+        #else
         config.computeUnits = .cpuAndNeuralEngine  // Exclude GPU for hybrid mode
+        #endif
 
         printError("Metal backend \(serverThreadIdx): Compiling model...")
         let compiledURL = try MLModel.compileModel(at: mlpackagePath)

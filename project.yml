@@ -80,6 +80,8 @@ targets:
       - target: KataGoSwift
       - package: mlx-swift
         product: MLX
+      # desc.cpp / fileutils.cpp / the katagocoreml parser read .bin.gz via zlib.
+      - sdk: libz.tbd
     settings:
       base:
         PRODUCT_NAME: katago
@@ -109,9 +111,9 @@ targets:
           - "$(SRCROOT)/Engine/katago/cpp/external/katagocoreml/vendor/modelpackage/src"
           - "$(SRCROOT)/Engine/katago/cpp/external/katagocoreml/vendor/deps/FP16/include"
           - "$(SRCROOT)/Engine/katago/cpp/external/nlohmann_json"
-          - "$(SRCROOT)/Engine/katago/cpp/external/protobuf-34.1/src"
-          - "$(SRCROOT)/Engine/katago/cpp/external/protobuf-34.1/third_party/utf8_range"
-          - "$(SRCROOT)/Engine/katago/cpp/external/abseil-cpp-20260107.1"
+          - "$(SRCROOT)/Engine/katago/cpp/external/protobuf-34/src"
+          - "$(SRCROOT)/Engine/katago/cpp/external/protobuf-34/third_party/utf8_range"
+          - "$(SRCROOT)/Engine/katago/cpp/external/abseil-cpp-20260107"
           - "$(SRCROOT)/Engine/katago/ThirdParty/mlx-swift/Source/Cmlx/mlx"
           - "$(SRCROOT)/Engine/katago/ThirdParty/mlx-swift/Source/Cmlx/mlx-c"
 
@@ -126,6 +128,13 @@ targets:
     sources:
       - path: GoLearner
       - path: Engine/Bridge
+        # The new GTP bridge (KataGoGTP) belongs to the full-engine targets
+        # (EngineHost / EngineSmokeTests), not the legacy app, which still links
+        # the Engine/cpp slice. It gets wired into the app at T4.
+        excludes:
+          - "KataGoGTP.h"
+          - "KataGoGTP.mm"
+          - "KataGoEngine-Bridging-Header.h"
       - path: Engine/cpp
         # Headers + .cpp compiled into the app; json.hpp is header-only.
       - path: Resources/KataGoModel19x19fp16.mlpackage
@@ -145,6 +154,68 @@ targets:
         MARKETING_VERSION: "0.1"
         CURRENT_PROJECT_VERSION: "1"
 
+  # ---------------------------------------------------------------------------
+  # EngineHost — minimal app that links the FULL vendored engine (libkatago.a +
+  # KataGoSwift + MLX) and the KataGoGTP bridge, and bundles the real
+  # b18c384nbt net + stripped gtp.cfg. It hosts EngineSmokeTests so the engine's
+  # CoreML inference (Swift Concurrency + GCD) runs in a real app process, not a
+  # hostless XCTest bundle (where the NN-server threads crash). NOT the app the
+  # user ships — GoLearner stays on the legacy slice until T4.
+  # ---------------------------------------------------------------------------
+  EngineHost:
+    type: application
+    platform: iOS
+    sources:
+      - path: EngineHost
+      - path: Engine/Bridge/KataGoGTP.h
+      - path: Engine/Bridge/KataGoGTP.mm
+      - path: Resources/default_model.bin.gz
+        buildPhase: resources
+      - path: Resources/default_gtp.cfg
+        buildPhase: resources
+    dependencies:
+      # katago (static lib) already pulls in MLX + KataGoSwift transitively.
+      - target: katago
+      - target: KataGoSwift
+        embed: true
+      - sdk: libz.tbd
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.golearner.enginehost
+        SWIFT_OBJC_BRIDGING_HEADER: "Engine/Bridge/KataGoEngine-Bridging-Header.h"
+        SWIFT_OBJC_INTEROP_MODE: objcxx
+        CLANG_CXX_LANGUAGE_STANDARD: "gnu++17"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/Engine/katago/cpp"
+          - "$(SRCROOT)/Engine/katago/cpp/core"
+        GCC_PREPROCESSOR_DEFINITIONS:
+          - "$(inherited)"
+          - "NO_GIT_REVISION=1"
+          - "OS_IS_IOS=1"
+          - "COMPILE_MAX_BOARD_LEN=37"
+
+  # T2 gate: hosted by EngineHost so inference runs in a real app process.
+  EngineSmokeTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: EngineSmokeTests
+    dependencies:
+      - target: EngineHost
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.golearner.enginesmoke
+        SWIFT_OBJC_BRIDGING_HEADER: "Engine/Bridge/KataGoEngine-Bridging-Header.h"
+        SWIFT_OBJC_INTEROP_MODE: objcxx
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/EngineHost.app/EngineHost"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/Engine/katago/cpp"
+          - "$(SRCROOT)/Engine/katago/cpp/core"
+
   GoLearnerTests:
     type: bundle.unit-test
     platform: iOS
@@ -154,6 +225,10 @@ targets:
       # subset itself, so it can exercise the correctness-critical engine path
       # directly without a duplicate-class clash against the app host.
       - path: Engine/Bridge
+        excludes:
+          - "KataGoGTP.h"
+          - "KataGoGTP.mm"
+          - "KataGoEngine-Bridging-Header.h"
       - path: Engine/cpp
       # Search + its value types (no CoreML dependency).
       - path: GoLearner/NNResult.swift
@@ -188,3 +263,12 @@ schemes:
     build:
       targets:
         katago: all
+  # T2 gate: build + run the in-process GTP smoke test against the full engine.
+  EngineSmokeTests:
+    build:
+      targets:
+        EngineSmokeTests: all
+    test:
+      config: Debug
+      targets:
+        - EngineSmokeTests
