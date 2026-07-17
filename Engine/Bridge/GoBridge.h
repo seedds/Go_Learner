@@ -29,6 +29,10 @@ extern const int GoBridgeNumGlobalFeatures;   // 19
 
 @property (nonatomic, readonly) int boardSize;
 @property (nonatomic, readonly) float komi;
+/// Ko rule (Rules::KO_*): 0 simple, 1 positional, 2 situational.
+@property (nonatomic, readonly) int koRule;
+/// Scoring rule (Rules::SCORING_*): 0 area, 1 territory.
+@property (nonatomic, readonly) int scoringRule;
 /// The side to move (GoColorBlack or GoColorWhite).
 @property (nonatomic, readonly) GoColor sideToMove;
 /// Number of moves played so far (passes included).
@@ -52,7 +56,23 @@ extern const int GoBridgeNumGlobalFeatures;   // 19
 - (instancetype)init NS_UNAVAILABLE;
 
 /// Reset to an empty board of the given size/komi (reuses the instance).
+/// Keeps the current ko/scoring rules.
 - (void)resetWithBoardSize:(int)size komi:(float)komi;
+
+/// Reset to an empty board with explicit ko/scoring rules (Rules::KO_* /
+/// Rules::SCORING_*). Other rule fields keep the Tromp-Taylor-ish defaults.
+- (void)resetWithBoardSize:(int)size komi:(float)komi
+                   koRule:(int)koRule scoringRule:(int)scoringRule
+    NS_SWIFT_NAME(reset(withBoardSize:komi:koRule:scoringRule:));
+
+/// Set up a fixed handicap: place `count` black stones at the given 0-indexed
+/// coordinates and make White the side to move. This becomes the game's replay
+/// base (undo/snapshot rewind to it, never below), so it must be called right
+/// after a reset, before any moves. `xs`/`ys` point to `count` ints each.
+/// KataGo infers the handicap count from the board; under the bundled net's
+/// WHB_ZERO rules there is no komi bonus to set.
+- (void)setupHandicapWithXs:(const int *)xs ys:(const int *)ys count:(int)count
+    NS_SWIFT_NAME(setupHandicap(xs:ys:count:));
 
 /// True if placing `color` at (x,y) is legal in the current position.
 - (BOOL)isLegalX:(int)x y:(int)y color:(GoColor)color;
@@ -71,6 +91,11 @@ extern const int GoBridgeNumGlobalFeatures;   // 19
 /// Used by search to explore variations without touching the real game.
 - (GoBridge *)clone;
 
+/// A clone of the game rewound to `ply` (0 = empty board, moveCount = current),
+/// with only the first `ply` moves applied. `ply` is clamped to [0, moveCount].
+/// Used for review/navigation without disturbing the live game.
+- (GoBridge *)snapshotAtPly:(NSInteger)ply NS_SWIFT_NAME(snapshot(atPly:));
+
 /// Color at (x,y): empty/black/white.
 - (GoColor)stoneColorAtX:(int)x y:(int)y NS_SWIFT_NAME(stoneColor(atX:y:));
 
@@ -81,6 +106,11 @@ extern const int GoBridgeNumGlobalFeatures;   // 19
 
 /// The location of the most recent non-pass move, or {-1,-1} if none.
 - (void)lastMoveX:(int *)x y:(int *)y;
+
+/// Read the move at history `index` (0-based). Writes the 0-indexed
+/// coordinates to x/y and returns YES for a stone move, or NO for a pass
+/// (in which case x/y are set to -1). `index` must be in [0, moveCount).
+- (BOOL)moveAtIndex:(NSInteger)index outX:(int *)x outY:(int *)y NS_SWIFT_NAME(move(atIndex:outX:outY:));
 
 @end
 

@@ -64,6 +64,14 @@ targets:
       # Search + its value types (no CoreML dependency).
       - path: GoLearner/NNResult.swift
       - path: GoLearner/MCTS.swift
+      # Pure SGF codec (Foundation + GoColor only).
+      - path: GoLearner/SGF.swift
+      # Fixed handicap placement table (Foundation + SGFPoint only).
+      - path: GoLearner/HandicapPoints.swift
+      # SGF → board replay (uses the bridge, no CoreML).
+      - path: GoLearner/BoardReconstruction.swift
+      # GIF rendering (CoreGraphics/ImageIO only; frames() uses the bridge).
+      - path: GoLearner/GameGIF.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.golearner.tests

@@ -15,12 +15,37 @@ enum PlayerKind: String, CaseIterable {
     case ai = "AI"
 }
 
+/// Ko rule, mirroring KataGo's `Rules::KO_*` integer constants.
+enum KoRule: Int, CaseIterable, Identifiable {
+    case simple = 0, positional = 1, situational = 2
+    var id: Int { rawValue }
+    var label: String {
+        switch self {
+        case .simple: return "Simple"
+        case .positional: return "Positional"
+        case .situational: return "Situational"
+        }
+    }
+}
+
+/// Scoring rule, mirroring KataGo's `Rules::SCORING_*` integer constants.
+enum ScoringRule: Int, CaseIterable, Identifiable {
+    case area = 0, territory = 1
+    var id: Int { rawValue }
+    var label: String { self == .area ? "Area" : "Territory" }
+}
+
 @MainActor
 @Observable
 final class GameState {
     // MARK: Configuration
     let boardSize: Int
-    let komi: Float
+    private(set) var komi: Float
+    private(set) var koRule: KoRule = .positional
+    private(set) var scoringRule: ScoringRule = .area
+    /// Fixed handicap stones for the current game (empty for an even game).
+    /// These form the replay base: navigation never rewinds below them.
+    private(set) var handicapStones: [SGFPoint] = []
 
     // MARK: Board state (mirrors the C++ bridge for rendering)
     /// Flat board colors, index = y*boardSize + x.
@@ -32,6 +57,22 @@ final class GameState {
     private(set) var moveCount: Int = 0
     private(set) var gameOver: Bool = false
     private(set) var gameResultText: String? = nil
+
+    // MARK: Review / navigation
+    /// Total moves in the live game (the tip of history).
+    private(set) var totalMoves: Int = 0
+    /// The ply currently being *viewed* (0 = empty board … totalMoves = live tip).
+    private(set) var currentPly: Int = 0
+    /// True while viewing a past position; the live game is untouched.
+    var isReviewing: Bool { reviewBridge != nil }
+    var canStepBackward: Bool { currentPly > 0 }
+    var canStepForward: Bool { currentPly < totalMoves }
+    /// Black's win probability from the latest analysis, or nil if none yet.
+    var blackWinrate: Double? {
+        guard let a = analysis else { return nil }
+        let black = sideToMove == .black ? a.winProbToMove : 1 - a.winProbToMove
+        return Double(black)
+    }
 
     // MARK: Player assignment
     var blackPlayer: PlayerKind = .human
@@ -45,6 +86,8 @@ final class GameState {
     private(set) var modelReady: Bool = false
 
     private let bridge: GoBridge
+    /// Non-nil while reviewing a past ply; renders instead of `bridge`.
+    private var reviewBridge: GoBridge? = nil
     private let engine: GoEngine
     private var mcts: MCTS? = nil
     private var analysisTask: Task<Void, Never>? = nil
@@ -114,7 +157,34 @@ final class GameState {
     func newGame() {
         generation += 1
         analysisTask?.cancel()
+        reviewBridge = nil
+        handicapStones = []              // reset() rebuilds an even-game base
         bridge.reset(withBoardSize: Int32(boardSize), komi: komi)
+        analysis = nil
+        refreshFromBridge()
+        statusMessage = modelReady ? "New game" : statusMessage
+        Task { await advance() }
+    }
+
+    /// Start a fresh game with new komi/rules and player assignment. Board size
+    /// is fixed for the app's lifetime (the bundled model is 19×19); passing a
+    /// different size is ignored. A `handicap` of 2…9 places fixed black stones
+    /// and makes White move first.
+    func configureNewGame(komi: Float, koRule: KoRule, scoringRule: ScoringRule,
+                          blackPlayer: PlayerKind, whitePlayer: PlayerKind,
+                          handicap: Int = 0) {
+        self.komi = komi
+        self.koRule = koRule
+        self.scoringRule = scoringRule
+        self.blackPlayer = blackPlayer
+        self.whitePlayer = whitePlayer
+        handicapStones = HandicapPoints.fixed(count: handicap, boardSize: boardSize)
+        generation += 1
+        analysisTask?.cancel()
+        reviewBridge = nil
+        bridge.reset(withBoardSize: Int32(boardSize), komi: komi,
+                     koRule: Int32(koRule.rawValue), scoringRule: Int32(scoringRule.rawValue))
+        if !handicapStones.isEmpty { bridge.setupHandicap(handicapStones) }
         analysis = nil
         refreshFromBridge()
         statusMessage = modelReady ? "New game" : statusMessage
@@ -124,6 +194,7 @@ final class GameState {
     /// Human tapping an intersection.
     func humanPlay(x: Int, y: Int) {
         guard !thinking else { return }
+        guard !isReviewing else { return }   // reviewing a past position is read-only
         guard !gameOver else { return }
         guard currentPlayerKind == .human else { return }
         guard bridge.playX(Int32(x), y: Int32(y), color: sideToMove) else {
@@ -136,7 +207,7 @@ final class GameState {
     }
 
     func humanPass() {
-        guard !thinking, !gameOver, currentPlayerKind == .human else { return }
+        guard !thinking, !isReviewing, !gameOver, currentPlayerKind == .human else { return }
         bridge.pass(for: sideToMove)
         generation += 1
         refreshFromBridge()
@@ -145,6 +216,7 @@ final class GameState {
 
     func undo() {
         guard !thinking else { return }
+        reviewBridge = nil                   // undo always acts on the live game
         guard bridge.undo() else { return }
         generation += 1
         analysisTask?.cancel()
@@ -153,9 +225,95 @@ final class GameState {
         Task { await advance() }
     }
 
+    // MARK: Navigation (review past positions without disturbing the live game)
+
+    func stepBackward() { goto(ply: currentPly - 1) }
+    func stepForward() { goto(ply: currentPly + 1) }
+    func stepToStart() { goto(ply: 0) }
+    func stepToEnd() { goto(ply: totalMoves) }
+
+    /// View the position after `ply` moves. `ply == totalMoves` returns to the
+    /// live game (review mode off); any earlier ply enters review mode.
+    func goto(ply: Int) {
+        let target = max(0, min(ply, totalMoves))
+        analysisTask?.cancel()
+        generation += 1
+        if target == totalMoves {
+            reviewBridge = nil            // back at the tip: resume the live game
+        } else {
+            reviewBridge = bridge.snapshot(atPly: target)
+        }
+        analysis = nil
+        refreshFromBridge()
+        Task { await advance() }
+    }
+
     func setPlayer(_ kind: PlayerKind, for color: GoColor) {
         if color == .black { blackPlayer = kind } else { whitePlayer = kind }
         Task { await advance() }
+    }
+
+    // MARK: - SGF
+
+    /// Serialize the live game (full history, not the reviewed ply) to SGF text.
+    func exportSGF() -> String {
+        var moves: [SGFMove] = []
+        // With a fixed handicap the setup stones are Black's and White moves
+        // first, so the recorded move sequence starts with White.
+        var color: GoColor = handicapStones.isEmpty ? .black : .white
+        for i in 0..<bridge.moveCount {
+            var mx: Int32 = -1, my: Int32 = -1
+            let isStone = bridge.move(atIndex: i, outX: &mx, outY: &my)
+            moves.append(isStone ? .play(color, Int(mx), Int(my)) : .pass(color))
+            color = color == .black ? .white : .black
+        }
+        let game = SGFGame(boardSize: boardSize, komi: komi, moves: moves,
+                           handicap: handicapStones.isEmpty ? 0 : handicapStones.count,
+                           setupBlack: handicapStones,
+                           result: gameOver ? gameResultText : nil)
+        return SGF.serialize(game)
+    }
+
+    /// Replace the live game with the main line parsed from `text`. Moves that
+    /// don't validate against the rules are skipped (best-effort import).
+    /// Returns false if the SGF board size differs from this game's size.
+    @discardableResult
+    func importSGF(_ text: String, koRule: KoRule? = nil, scoringRule: ScoringRule? = nil) -> Bool {
+        guard let parsed = try? SGF.parse(text) else { return false }
+        guard parsed.boardSize == boardSize else { return false }
+
+        komi = parsed.komi                       // SGF carries komi (KM)
+        if let koRule { self.koRule = koRule }    // rules restored from the store
+        if let scoringRule { self.scoringRule = scoringRule }
+        handicapStones = parsed.setupBlack        // empty for an even game
+        generation += 1
+        analysisTask?.cancel()
+        reviewBridge = nil
+        bridge.reset(withBoardSize: Int32(boardSize), komi: komi,
+                     koRule: Int32(self.koRule.rawValue), scoringRule: Int32(self.scoringRule.rawValue))
+        if !handicapStones.isEmpty { bridge.setupHandicap(handicapStones) }
+        for m in parsed.moves {
+            if m.isPass {
+                bridge.pass(for: m.color)
+            } else if !bridge.playX(Int32(m.x), y: Int32(m.y), color: m.color) {
+                // Illegal for the current rules/turn — stop the import here
+                // rather than silently desynchronizing color/turn order.
+                break
+            }
+        }
+        analysis = nil
+        refreshFromBridge()
+        statusMessage = "Imported \(moveCount) moves"
+        Task { await advance() }
+        return true
+    }
+
+    // MARK: - GIF export
+
+    /// Snapshot every position (empty board → final move) for GIF rendering.
+    /// Reads the live game's history, independent of the reviewed ply.
+    func gifFrames() -> [GameGIF.Frame] {
+        GameGIF.frames(from: bridge)
     }
 
     func toggleAnalysis() {
@@ -176,6 +334,13 @@ final class GameState {
         guard modelReady else { return }
         if gameOver {
             statusMessage = gameResultText ?? "Game over"
+            return
+        }
+
+        // While reviewing a past position, never mutate the live game; just
+        // (optionally) analyze what's on screen.
+        if isReviewing {
+            if analysisEnabled { await runAnalysis() }
             return
         }
 
@@ -221,8 +386,9 @@ final class GameState {
         guard let mcts else { return }
         analysisTask?.cancel()
         let gen = generation
+        let rootBridge = activeBridge
         let task = Task { @MainActor in
-            guard let result = await mcts.search(rootBridge: self.bridge, playouts: self.analysisPlayouts, shouldContinue: {
+            guard let result = await mcts.search(rootBridge: rootBridge, playouts: self.analysisPlayouts, shouldContinue: {
                 gen == self.generation && !Task.isCancelled
             }) else { return }
             guard gen == self.generation else { return }
@@ -288,24 +454,31 @@ final class GameState {
 
     // MARK: - Sync
 
+    /// The bridge that should drive rendering: the review snapshot if we're
+    /// looking at a past position, otherwise the live game.
+    private var activeBridge: GoBridge { reviewBridge ?? bridge }
+
     private func refreshFromBridge() {
+        let b = activeBridge
         for y in 0..<boardSize {
             for x in 0..<boardSize {
-                stones[y * boardSize + x] = bridge.stoneColor(atX: Int32(x), y: Int32(y))
+                stones[y * boardSize + x] = b.stoneColor(atX: Int32(x), y: Int32(y))
             }
         }
-        sideToMove = bridge.sideToMove
-        blackCaptures = Int(bridge.blackCaptures)
-        whiteCaptures = Int(bridge.whiteCaptures)
-        moveCount = bridge.moveCount
+        sideToMove = b.sideToMove
+        blackCaptures = Int(b.blackCaptures)
+        whiteCaptures = Int(b.whiteCaptures)
+        moveCount = b.moveCount
+        totalMoves = bridge.moveCount        // the live tip, regardless of review
+        currentPly = b.moveCount
         var lx: Int32 = -1, ly: Int32 = -1
-        bridge.lastMoveX(&lx, y: &ly)
+        b.lastMoveX(&lx, y: &ly)
         lastMove = lx >= 0 ? (Int(lx), Int(ly)) : nil
-        gameOver = bridge.gameFinished
-        gameResultText = gameOver ? resultText() : nil
+        gameOver = b.gameFinished
+        gameResultText = gameOver ? resultText(b) : nil
     }
 
-    private func resultText() -> String {
+    private func resultText(_ bridge: GoBridge) -> String {
         if bridge.isNoResult { return "No result" }
         let score = bridge.finalWhiteMinusBlackScore
         switch bridge.winner {

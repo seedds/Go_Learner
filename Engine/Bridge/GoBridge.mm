@@ -29,6 +29,11 @@ Player toPlayer(GoColor c) { return c == GoColorWhite ? P_WHITE : P_BLACK; }
     // Recorded moves (Board::PASS_LOC for passes) so we can implement undo by replay.
     std::vector<Loc> _moves;
     int _size;
+    // The position the game is replayed *from* for undo/snapshot: normally an
+    // empty board with Black to move, but a handicap setup makes it the placed
+    // stones with White to move. Undo/snapshot never rewind below this base.
+    Board _initialBoard;
+    Player _initialPla;
 }
 
 // Runs before the class receives its first message (including +alloc), which is
@@ -51,19 +56,58 @@ Player toPlayer(GoColor c) { return c == GoColorWhite ? P_WHITE : P_BLACK; }
 }
 
 - (void)resetWithBoardSize:(int)size komi:(float)komi {
+    [self resetWithBoardSize:size komi:komi koRule:_rules.koRule scoringRule:_rules.scoringRule];
+}
+
+- (void)resetWithBoardSize:(int)size komi:(float)komi koRule:(int)koRule scoringRule:(int)scoringRule {
     _size = size;
     _rules = Rules::getTrompTaylorish();  // area scoring, positional superko, matches net training
     _rules.komi = komi;
-    _board = Board(size, size);
-    _history.clear(_board, P_BLACK, _rules, 0);
-    _sideToMove = P_BLACK;
+    _rules.koRule = koRule;
+    _rules.scoringRule = scoringRule;
+    _initialBoard = Board(size, size);   // empty base, Black first (non-handicap default)
+    _initialPla = P_BLACK;
+    [self restoreBaseThenReplay:0];
+}
+
+- (void)setupHandicapWithXs:(const int *)xs ys:(const int *)ys count:(int)count {
+    Board board(_size, _size);
+    for (int i = 0; i < count; i++) {
+        Loc loc = Location::getLoc(xs[i], ys[i], _size);
+        board.setStone(loc, C_BLACK);
+    }
+    _initialBoard = board;
+    _initialPla = P_WHITE;               // Black has already placed; White opens
+    [self restoreBaseThenReplay:0];
+}
+
+// Rebuild _board/_history from the replay base and re-apply the first `count`
+// recorded moves. All rewind paths (reset, undo, snapshot, handicap setup) go
+// through here so the base position is honored in exactly one place. Trailing
+// moves beyond `count` are dropped from `_moves`.
+- (void)restoreBaseThenReplay:(NSInteger)count {
+    NSInteger n = (NSInteger)_moves.size();
+    if (count < 0) count = 0;
+    if (count > n) count = n;
+    _board = _initialBoard;
+    _history.clear(_board, _initialPla, _rules, 0);
+    _sideToMove = _initialPla;
+    std::vector<Loc> replay(_moves.begin(), _moves.begin() + count);
     _moves.clear();
+    for (Loc loc : replay) {
+        Player pla = _sideToMove;
+        _history.makeBoardMoveAssumeLegal(_board, loc, pla, NULL);
+        _moves.push_back(loc);
+        _sideToMove = getOpp(pla);
+    }
 }
 
 #pragma mark - Read-only state
 
 - (int)boardSize { return _size; }
 - (float)komi { return _rules.komi; }
+- (int)koRule { return _rules.koRule; }
+- (int)scoringRule { return _rules.scoringRule; }
 - (GoColor)sideToMove { return _sideToMove == P_WHITE ? GoColorWhite : GoColorBlack; }
 - (NSInteger)moveCount { return (NSInteger)_moves.size(); }
 // KataGo's numWhiteCaptures = number of WHITE stones removed from the board,
@@ -98,6 +142,16 @@ Player toPlayer(GoColor c) { return c == GoColorWhite ? P_WHITE : P_BLACK; }
     }
 }
 
+- (BOOL)moveAtIndex:(NSInteger)index outX:(int *)x outY:(int *)y {
+    *x = -1; *y = -1;
+    if (index < 0 || index >= (NSInteger)_moves.size()) return NO;
+    Loc loc = _moves[(size_t)index];
+    if (loc == Board::PASS_LOC || loc == Board::NULL_LOC) return NO;
+    *x = Location::getX(loc, _size);
+    *y = Location::getY(loc, _size);
+    return YES;
+}
+
 #pragma mark - Legality & moves
 
 - (BOOL)isLegalX:(int)x y:(int)y color:(GoColor)color {
@@ -124,19 +178,8 @@ Player toPlayer(GoColor c) { return c == GoColorWhite ? P_WHITE : P_BLACK; }
 }
 
 - (BOOL)undo {
-    if (_moves.empty()) return NO;
-    std::vector<Loc> replay(_moves.begin(), _moves.end() - 1);
-    // Rebuild from scratch.
-    _board = Board(_size, _size);
-    _history.clear(_board, P_BLACK, _rules, 0);
-    _sideToMove = P_BLACK;
-    _moves.clear();
-    for (Loc loc : replay) {
-        Player pla = _sideToMove;
-        _history.makeBoardMoveAssumeLegal(_board, loc, pla, NULL);
-        _moves.push_back(loc);
-        _sideToMove = getOpp(pla);
-    }
+    if (_moves.empty()) return NO;   // nothing above the replay base
+    [self restoreBaseThenReplay:(NSInteger)_moves.size() - 1];
     return YES;
 }
 
@@ -147,6 +190,17 @@ Player toPlayer(GoColor c) { return c == GoColorWhite ? P_WHITE : P_BLACK; }
     c->_rules = _rules;
     c->_sideToMove = _sideToMove;
     c->_moves = _moves;
+    c->_initialBoard = _initialBoard;
+    c->_initialPla = _initialPla;
+    return c;
+}
+
+- (GoBridge *)snapshotAtPly:(NSInteger)ply {
+    // A clone rewound to `ply` moves above the replay base (0 = the base
+    // position itself, i.e. empty board or handicap setup). KataGo has no
+    // random-access rewind, so we replay through the shared base helper.
+    GoBridge *c = [self clone];
+    [c restoreBaseThenReplay:ply];
     return c;
 }
 
