@@ -4,6 +4,22 @@ options:
   deploymentTarget:
     iOS: "26.0"
   createIntermediateGroups: true
+  # C/C++ headers are resolved via HEADER_SEARCH_PATHS, not a build phase. Keep
+  # them out of any Headers/CopyFiles phase so the vendored engine's duplicate
+  # header basenames (e.g. fp16.h in FP16 + mlx) don't collide when a static
+  # library would otherwise try to flatten them into one include dir.
+  fileTypes:
+    h: { buildPhase: none }
+    hpp: { buildPhase: none }
+    hxx: { buildPhase: none }
+    inc: { buildPhase: none }
+    ipp: { buildPhase: none }
+
+# Local SwiftPM package: the vendored mlx-swift fork (Cmlx C++ core + MLX Swift
+# libs). Consumed by the katago engine's MLX backend. See Engine/katago/UPSTREAM.txt.
+packages:
+  mlx-swift:
+    path: Engine/katago/ThirdParty/mlx-swift
 
 settings:
   base:
@@ -26,6 +42,84 @@ settings:
     GCC_WARN_INHIBIT_ALL_WARNINGS: YES
 
 targets:
+  # ---------------------------------------------------------------------------
+  # KataGoSwift — the Swift⇄C++ interop framework the MLX backend calls into for
+  # the CoreML/ANE mux (MetalComputeContext / CoreMLComputeHandle). Built with
+  # objcxx interop so it emits a C++-visible `KataGoSwift-swift.h` that the
+  # engine's mlxbackend.cpp #includes. Foundation/CoreML/MPS only — no engine
+  # dependency, so the dependency graph stays acyclic (MLX → KataGoSwift →
+  # katago → app).
+  # ---------------------------------------------------------------------------
+  KataGoSwift:
+    type: framework
+    platform: iOS
+    sources:
+      - path: Engine/katago/KataGoSwift
+    settings:
+      base:
+        PRODUCT_NAME: KataGoSwift
+        DEFINES_MODULE: YES
+        SWIFT_OBJC_INTEROP_MODE: objcxx
+        CLANG_CXX_LANGUAGE_STANDARD: "gnu++20"
+        CLANG_ENABLE_MODULES: YES
+        GENERATE_INFOPLIST_FILE: YES
+
+  # ---------------------------------------------------------------------------
+  # katago — the full vendored KataGo engine (rules + search + native SGF + the
+  # MLX/CoreML neural-net backend) as a static library. Compiles the pruned
+  # cpp/ tree (engine + the abseil/protobuf/katagocoreml subset the CoreML
+  # converter needs). Header/preprocessor recipe mirrors the reference
+  # 'katago' framework target. Links MLX + KataGoSwift.
+  # ---------------------------------------------------------------------------
+  katago:
+    type: library.static
+    platform: iOS
+    sources:
+      - path: Engine/katago/cpp
+    dependencies:
+      - target: KataGoSwift
+      - package: mlx-swift
+        product: MLX
+    settings:
+      base:
+        PRODUCT_NAME: katago
+        CLANG_CXX_LANGUAGE_STANDARD: "gnu++17"
+        CLANG_ENABLE_MODULES: YES
+        # objcxx so the C++ TUs can import the KataGoSwift framework module and
+        # its generated C++ interop header (<KataGoSwift/KataGoSwift-swift.h>).
+        SWIFT_OBJC_INTEROP_MODE: objcxx
+        GCC_PREPROCESSOR_DEFINITIONS:
+          - "$(inherited)"
+          - "USE_MLX_BACKEND=1"
+          - "NO_LIBZIP=1"
+          - "NO_GIT_REVISION=1"
+          - "OS_IS_IOS=1"
+          - "COMPILE_MAX_BOARD_LEN=37"
+        # Mirror the reference target's HEADER_SEARCH_PATHS + SYSTEM_HEADER_SEARCH_PATHS.
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/Engine/katago/cpp"
+          - "$(SRCROOT)/Engine/katago/cpp/external/tclap-1.2.5/include"
+          - "$(SRCROOT)/Engine/katago/cpp/external"
+          - "$(SRCROOT)/Engine/katago/cpp/external/filesystem-1.5.8/include"
+          - "$(SRCROOT)/Engine/katago/cpp/external/katagocoreml/include"
+          - "$(SRCROOT)/Engine/katago/cpp/external/katagocoreml/src"
+          - "$(SRCROOT)/Engine/katago/cpp/external/katagocoreml/generated"
+          - "$(SRCROOT)/Engine/katago/cpp/external/katagocoreml/vendor/mlmodel/format"
+          - "$(SRCROOT)/Engine/katago/cpp/external/katagocoreml/vendor/mlmodel/src"
+          - "$(SRCROOT)/Engine/katago/cpp/external/katagocoreml/vendor/modelpackage/src"
+          - "$(SRCROOT)/Engine/katago/cpp/external/katagocoreml/vendor/deps/FP16/include"
+          - "$(SRCROOT)/Engine/katago/cpp/external/nlohmann_json"
+          - "$(SRCROOT)/Engine/katago/cpp/external/protobuf-34.1/src"
+          - "$(SRCROOT)/Engine/katago/cpp/external/protobuf-34.1/third_party/utf8_range"
+          - "$(SRCROOT)/Engine/katago/cpp/external/abseil-cpp-20260107.1"
+          - "$(SRCROOT)/Engine/katago/ThirdParty/mlx-swift/Source/Cmlx/mlx"
+          - "$(SRCROOT)/Engine/katago/ThirdParty/mlx-swift/Source/Cmlx/mlx-c"
+
+  # ---------------------------------------------------------------------------
+  # GoLearner — the app. Still built on the legacy Engine/cpp slice + bridge
+  # until T4 repoints it at the katago engine over GTP. (The katago/KataGoSwift
+  # targets above are validated independently in T1b before the pivot.)
+  # ---------------------------------------------------------------------------
   GoLearner:
     type: application
     platform: iOS
@@ -89,3 +183,8 @@ schemes:
       config: Debug
       targets:
         - GoLearnerTests
+  # Standalone scheme to build/validate the vendored engine in isolation (T1b).
+  katago:
+    build:
+      targets:
+        katago: all
