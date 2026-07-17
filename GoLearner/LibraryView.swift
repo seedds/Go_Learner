@@ -105,6 +105,6 @@ struct ThumbnailBoard: View {
         guard let game = try? SGF.parse(sgf) else {
             return [GoColor](repeating: .empty, count: boardSize * boardSize)
         }
-        return MainActor.assumeIsolated { BoardReconstruction.stones(from: game) }
+        return BoardReconstruction.stones(from: game)
     }
 }

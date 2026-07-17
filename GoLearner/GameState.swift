@@ -2,8 +2,17 @@
 //  GameState.swift
 //  GoLearner
 //
-//  The main-actor observable model. Owns the single-threaded C++ GoBridge and
-//  drives the async GoEngine (Core ML). Holds all state the SwiftUI views read.
+//  The main-actor observable model. After the P0 engine pivot it drives the full
+//  vendored KataGo engine in-process over GTP (via GameSession) for AI moves and
+//  analysis, and keeps a Swift-side move-list record that GoReplay renders into
+//  board positions (live view, review navigation, GIF frames, thumbnails) with
+//  KataGo's own rules — no separate stateful C++ board object.
+//
+//  Ownership split:
+//  • GameSession (off-main actor) owns the engine: play/genmove/analyze.
+//  • GameState (main actor) owns the move-list record + observable UI state, and
+//    keeps the engine in sync (every live move is mirrored to the engine).
+//  • GoReplay (stateless) turns the record into stone grids on demand.
 //
 
 import SwiftUI
@@ -26,6 +35,14 @@ enum KoRule: Int, CaseIterable, Identifiable {
         case .situational: return "Situational"
         }
     }
+    /// KataGo GTP `kata-set-rule ko` token.
+    var gtpToken: String {
+        switch self {
+        case .simple: return "SIMPLE"
+        case .positional: return "POSITIONAL"
+        case .situational: return "SITUATIONAL"
+        }
+    }
 }
 
 /// Scoring rule, mirroring KataGo's `Rules::SCORING_*` integer constants.
@@ -33,6 +50,7 @@ enum ScoringRule: Int, CaseIterable, Identifiable {
     case area = 0, territory = 1
     var id: Int { rawValue }
     var label: String { self == .area ? "Area" : "Territory" }
+    var gtpToken: String { self == .area ? "AREA" : "TERRITORY" }
 }
 
 @MainActor
@@ -43,11 +61,11 @@ final class GameState {
     private(set) var komi: Float
     private(set) var koRule: KoRule = .positional
     private(set) var scoringRule: ScoringRule = .area
-    /// Fixed handicap stones for the current game (empty for an even game).
-    /// These form the replay base: navigation never rewinds below them.
+    /// Fixed handicap stones for the current game (empty for an even game). These
+    /// form the replay base: navigation never rewinds below them.
     private(set) var handicapStones: [SGFPoint] = []
 
-    // MARK: Board state (mirrors the C++ bridge for rendering)
+    // MARK: Board state (derived from the move-list record via GoReplay)
     /// Flat board colors, index = y*boardSize + x.
     private(set) var stones: [GoColor]
     private(set) var lastMove: (x: Int, y: Int)?
@@ -61,10 +79,10 @@ final class GameState {
     // MARK: Review / navigation
     /// Total moves in the live game (the tip of history).
     private(set) var totalMoves: Int = 0
-    /// The ply currently being *viewed* (0 = empty board … totalMoves = live tip).
+    /// The ply currently being *viewed* (0 = empty/handicap base … totalMoves = tip).
     private(set) var currentPly: Int = 0
     /// True while viewing a past position; the live game is untouched.
-    var isReviewing: Bool { reviewBridge != nil }
+    var isReviewing: Bool { currentPly < totalMoves }
     var canStepBackward: Bool { currentPly > 0 }
     var canStepForward: Bool { currentPly < totalMoves }
     /// Black's win probability from the latest analysis, or nil if none yet.
@@ -85,70 +103,84 @@ final class GameState {
     private(set) var statusMessage: String = "Loading network…"
     private(set) var modelReady: Bool = false
 
-    private let bridge: GoBridge
-    /// Non-nil while reviewing a past ply; renders instead of `bridge`.
-    private var reviewBridge: GoBridge? = nil
-    private let engine: GoEngine
-    private var mcts: MCTS? = nil
+    // MARK: Engine + record
+    private let session: GameSession
+    /// The live game's move record (the tip). Rendering/review replay from this.
+    private var moves: [ReplayMove] = []
     private var analysisTask: Task<Void, Never>? = nil
     /// Monotonic token so stale async results are ignored after new moves.
     private var generation: Int = 0
 
     #if targetEnvironment(simulator)
-    private let aiPlayouts = 24        // Core ML runs on CPU in the sim; keep it snappy
-    private let analysisPlayouts = 12
+    private let aiMaxTime: Float = 1.0        // CoreML on CPU in the sim; keep it snappy
+    private let analysisMaxMoves = 12
     #else
-    private let aiPlayouts = 100
-    private let analysisPlayouts = 48
+    private let aiMaxTime: Float = 3.0
+    private let analysisMaxMoves = 30
     #endif
+
+    /// When hosted by the XCTest bundle, the app must NOT launch/drive the
+    /// process-global engine: the test owns it, and a second GTP reader would
+    /// deadlock on the shared output stream. The board still renders via the
+    /// engine-free GoReplay path.
+    private static var isRunningUnderTests: Bool {
+        NSClassFromString("XCTestCase") != nil
+    }
 
     init(boardSize: Int = 19, komi: Float = 7.5) {
         self.boardSize = boardSize
         self.komi = komi
-        self.bridge = GoBridge(boardSize: Int32(boardSize), komi: komi)
-        self.engine = GoEngine(size: boardSize)
         self.stones = Array(repeating: .empty, count: boardSize * boardSize)
-        refreshFromBridge()
-        Task { await warmUp() }
+        self.session = GameState.makeSession(boardSize: boardSize,
+                                             launchEngine: !GameState.isRunningUnderTests)
+        refreshFromRecord()
+        if !GameState.isRunningUnderTests {
+            Task { await warmUp() }
+        }
+    }
+
+    /// Build the engine session. Launches the in-process engine unless suppressed
+    /// (under tests, where the test owns the single process-global engine).
+    private static func makeSession(boardSize: Int, launchEngine: Bool) -> GameSession {
+        if launchEngine {
+            let bundle = Bundle.main
+            let modelPath = bundle.path(forResource: "default_model", ofType: "bin.gz") ?? ""
+            let configPath = bundle.path(forResource: "default_gtp", ofType: "cfg") ?? ""
+            InProcessKataGoEngine.launch(modelPath: modelPath, configPath: configPath)
+        }
+        return GameSession(engine: InProcessKataGoEngine(), boardSize: boardSize)
     }
 
     private func warmUp() async {
-        await engine.warmUp()
-        mcts = MCTS(boardSize: boardSize, evaluator: engine)
+        let ok = await session.handshake(timeout: 600)
+        guard ok else {
+            statusMessage = "Engine failed to start"
+            return
+        }
+        await syncEngineToRecord()
         modelReady = true
         statusMessage = "Ready"
         #if DEBUG
         await selfCheck()
         #endif
-        // Kick off analysis / AI if appropriate for the opening position.
         await advance()
     }
 
     #if DEBUG
-    /// One-time end-to-end Core ML sanity check logged at startup (G3/G4).
-    /// On an empty board the game is ~balanced, so Black's win% should sit near
-    /// the middle and the score lead near komi. Logged via os_log("GoLearner").
+    /// One-time end-to-end sanity check logged at startup: an empty-board
+    /// genmove should be a corner/star-point opening (>=2 lines from every edge),
+    /// the signal that model + inference + GTP decode are all correct.
     private func selfCheck() async {
-        guard let r = await evaluateCurrent() else {
-            os_log("selfCheck: evaluation FAILED", log: .default, type: .error)
+        guard let vertex = await session.genMove(color: "B") else {
+            os_log("selfCheck: genmove FAILED", log: .default, type: .error)
             return
         }
-        let (best, prob) = bestPolicyMove(r)
-        let bx = best.map { $0 % boardSize } ?? -1
-        let by = best.map { $0 / boardSize } ?? -1
-        os_log("GoLearner selfCheck OK: policyCount=%d bestMove=(%d,%d) p=%.3f winToMove=%.3f whiteLead=%.2f own[0]=%.3f",
-               log: .default, type: .info,
-               r.policy.count, bx, by, prob, r.winProbToMove, r.whiteLead, r.whiteOwnership.first ?? 0)
-
-        if let mcts {
-            let gen = generation
-            if let s = await mcts.search(rootBridge: bridge, playouts: 16, shouldContinue: { gen == self.generation }) {
-                let sbx = s.bestMove.map { $0 % boardSize } ?? -1
-                let sby = s.bestMove.map { $0 / boardSize } ?? -1
-                os_log("GoLearner selfCheck MCTS: playouts=%d bestMove=(%d,%d) blackWin=%.3f whiteLead=%.2f",
-                       log: .default, type: .info, s.playouts, sbx, sby, s.blackWinProb, s.whiteLead)
-            }
-        }
+        // Undo the probe move so it doesn't pollute the live game.
+        await session.command("undo")
+        let pos = GtpAnalysisParser.vertexToPosition(vertex.uppercased(), size: boardSize)
+        let x = pos.map { $0 % boardSize } ?? -1
+        let y = pos.map { $0 / boardSize } ?? -1
+        os_log("GoLearner selfCheck genmove=%{public}@ (%d,%d)", log: .default, type: .info, vertex, x, y)
     }
     #endif
 
@@ -157,19 +189,17 @@ final class GameState {
     func newGame() {
         generation += 1
         analysisTask?.cancel()
-        reviewBridge = nil
-        handicapStones = []              // reset() rebuilds an even-game base
-        bridge.reset(withBoardSize: Int32(boardSize), komi: komi)
+        handicapStones = []
+        moves = []
         analysis = nil
-        refreshFromBridge()
+        refreshFromRecord()
         statusMessage = modelReady ? "New game" : statusMessage
-        Task { await advance() }
+        Task { await resetEngineAndAdvance() }
     }
 
     /// Start a fresh game with new komi/rules and player assignment. Board size
-    /// is fixed for the app's lifetime (the bundled model is 19×19); passing a
-    /// different size is ignored. A `handicap` of 2…9 places fixed black stones
-    /// and makes White move first.
+    /// is fixed for the app's lifetime (the bundled net is 19×19). A `handicap`
+    /// of 2…9 places fixed black stones and makes White move first.
     func configureNewGame(komi: Float, koRule: KoRule, scoringRule: ScoringRule,
                           blackPlayer: PlayerKind, whitePlayer: PlayerKind,
                           handicap: Int = 0) {
@@ -181,48 +211,57 @@ final class GameState {
         handicapStones = HandicapPoints.fixed(count: handicap, boardSize: boardSize)
         generation += 1
         analysisTask?.cancel()
-        reviewBridge = nil
-        bridge.reset(withBoardSize: Int32(boardSize), komi: komi,
-                     koRule: Int32(koRule.rawValue), scoringRule: Int32(scoringRule.rawValue))
-        if !handicapStones.isEmpty { bridge.setupHandicap(handicapStones) }
+        moves = []
         analysis = nil
-        refreshFromBridge()
+        refreshFromRecord()
         statusMessage = modelReady ? "New game" : statusMessage
-        Task { await advance() }
+        Task { await resetEngineAndAdvance() }
     }
 
     /// Human tapping an intersection.
     func humanPlay(x: Int, y: Int) {
-        guard !thinking else { return }
-        guard !isReviewing else { return }   // reviewing a past position is read-only
-        guard !gameOver else { return }
+        guard !thinking, !isReviewing, !gameOver else { return }
         guard currentPlayerKind == .human else { return }
-        guard bridge.playX(Int32(x), y: Int32(y), color: sideToMove) else {
+        let color = sideToMove
+        // GoReplay is the rules authority for legality (same rules as the engine)
+        // and works even before the engine finishes loading.
+        guard GoReplayKit.isLegal(size: boardSize, handicap: handicapStones,
+                                  moves: moves, candidate: .play(color, x, y)) else {
             statusMessage = "Illegal move"
             return
         }
+        moves.append(.play(color, x, y))
         generation += 1
-        refreshFromBridge()
-        Task { await advance() }
+        refreshFromRecord()
+        Task {
+            if modelReady { await session.command(GtpCommandBuilder.play(color: gtp(color), x: x, yFromTop: y, size: boardSize)) }
+            await advance()
+        }
     }
 
     func humanPass() {
         guard !thinking, !isReviewing, !gameOver, currentPlayerKind == .human else { return }
-        bridge.pass(for: sideToMove)
+        let color = sideToMove
+        moves.append(.pass(color))
         generation += 1
-        refreshFromBridge()
-        Task { await advance() }
+        refreshFromRecord()
+        Task {
+            if modelReady { await session.command(GtpCommandBuilder.play(color: gtp(color), pass: true)) }
+            await advance()
+        }
     }
 
     func undo() {
-        guard !thinking else { return }
-        reviewBridge = nil                   // undo always acts on the live game
-        guard bridge.undo() else { return }
+        guard !thinking, !moves.isEmpty else { return }
+        moves.removeLast()
         generation += 1
         analysisTask?.cancel()
         analysis = nil
-        refreshFromBridge()
-        Task { await advance() }
+        refreshFromRecord()
+        Task {
+            if modelReady { await session.command("undo") }
+            await advance()
+        }
     }
 
     // MARK: Navigation (review past positions without disturbing the live game)
@@ -233,18 +272,14 @@ final class GameState {
     func stepToEnd() { goto(ply: totalMoves) }
 
     /// View the position after `ply` moves. `ply == totalMoves` returns to the
-    /// live game (review mode off); any earlier ply enters review mode.
+    /// live tip; any earlier ply enters review mode (render-only, engine idle).
     func goto(ply: Int) {
         let target = max(0, min(ply, totalMoves))
         analysisTask?.cancel()
         generation += 1
-        if target == totalMoves {
-            reviewBridge = nil            // back at the tip: resume the live game
-        } else {
-            reviewBridge = bridge.snapshot(atPly: target)
-        }
+        currentPly = target
         analysis = nil
-        refreshFromBridge()
+        refreshFromRecord()
         Task { await advance() }
     }
 
@@ -257,68 +292,50 @@ final class GameState {
 
     /// Serialize the live game (full history, not the reviewed ply) to SGF text.
     func exportSGF() -> String {
-        var moves: [SGFMove] = []
-        // With a fixed handicap the setup stones are Black's and White moves
-        // first, so the recorded move sequence starts with White.
-        var color: GoColor = handicapStones.isEmpty ? .black : .white
-        for i in 0..<bridge.moveCount {
-            var mx: Int32 = -1, my: Int32 = -1
-            let isStone = bridge.move(atIndex: i, outX: &mx, outY: &my)
-            moves.append(isStone ? .play(color, Int(mx), Int(my)) : .pass(color))
-            color = color == .black ? .white : .black
+        var sgfMoves: [SGFMove] = []
+        for m in moves {
+            sgfMoves.append(m.isPass ? .pass(m.color) : .play(m.color, m.x, m.y))
         }
-        let game = SGFGame(boardSize: boardSize, komi: komi, moves: moves,
+        let game = SGFGame(boardSize: boardSize, komi: komi, moves: sgfMoves,
                            handicap: handicapStones.isEmpty ? 0 : handicapStones.count,
                            setupBlack: handicapStones,
                            result: gameOver ? gameResultText : nil)
         return SGF.serialize(game)
     }
 
-    /// Replace the live game with the main line parsed from `text`. Moves that
-    /// don't validate against the rules are skipped (best-effort import).
-    /// Returns false if the SGF board size differs from this game's size.
+    /// Replace the live game with the main line parsed from `text`. Returns false
+    /// if the SGF board size differs from this game's size.
     @discardableResult
     func importSGF(_ text: String, koRule: KoRule? = nil, scoringRule: ScoringRule? = nil) -> Bool {
-        guard let parsed = try? SGF.parse(text) else { return false }
-        guard parsed.boardSize == boardSize else { return false }
-
-        komi = parsed.komi                       // SGF carries komi (KM)
-        if let koRule { self.koRule = koRule }    // rules restored from the store
+        guard let parsed = try? SGF.parse(text), parsed.boardSize == boardSize else { return false }
+        komi = parsed.komi
+        if let koRule { self.koRule = koRule }
         if let scoringRule { self.scoringRule = scoringRule }
-        handicapStones = parsed.setupBlack        // empty for an even game
+        handicapStones = parsed.setupBlack
+        // Keep only moves that replay legally (best-effort import), so the record
+        // never desyncs from the engine.
+        moves = GoReplayKit.legalMoves(size: boardSize, handicap: handicapStones,
+                                       candidates: GoReplayKit.replayMoves(from: parsed.moves))
         generation += 1
         analysisTask?.cancel()
-        reviewBridge = nil
-        bridge.reset(withBoardSize: Int32(boardSize), komi: komi,
-                     koRule: Int32(self.koRule.rawValue), scoringRule: Int32(self.scoringRule.rawValue))
-        if !handicapStones.isEmpty { bridge.setupHandicap(handicapStones) }
-        for m in parsed.moves {
-            if m.isPass {
-                bridge.pass(for: m.color)
-            } else if !bridge.playX(Int32(m.x), y: Int32(m.y), color: m.color) {
-                // Illegal for the current rules/turn — stop the import here
-                // rather than silently desynchronizing color/turn order.
-                break
-            }
-        }
         analysis = nil
-        refreshFromBridge()
+        refreshFromRecord()
         statusMessage = "Imported \(moveCount) moves"
-        Task { await advance() }
+        Task { await resetEngineAndAdvance() }
         return true
     }
 
     // MARK: - GIF export
 
-    /// Snapshot every position (empty board → final move) for GIF rendering.
-    /// Reads the live game's history, independent of the reviewed ply.
+    /// Snapshot every position (base → final move) for GIF rendering, from the
+    /// live record independent of the reviewed ply.
     func gifFrames() -> [GameGIF.Frame] {
-        GameGIF.frames(from: bridge)
+        GameGIF.frames(size: boardSize, handicap: handicapStones, moves: moves)
     }
 
     func toggleAnalysis() {
         analysisEnabled.toggle()
-        if !analysisEnabled { analysis = nil }
+        if !analysisEnabled { analysis = nil; analysisTask?.cancel() }
         Task { await advance() }
     }
 
@@ -328,21 +345,43 @@ final class GameState {
         sideToMove == .black ? blackPlayer : whitePlayer
     }
 
-    /// Decide what the engine should do next: play the AI's move, refresh the
-    /// analysis overlay, or nothing. Re-entrant-safe via the generation token.
+    private func gtp(_ color: GoColor) -> String { color == .black ? "B" : "W" }
+
+    /// Reset the engine to a fresh game matching the current config + record,
+    /// then advance. Used by new/configure/import.
+    private func resetEngineAndAdvance() async {
+        guard modelReady else { return }
+        await syncEngineToRecord()
+        await advance()
+    }
+
+    /// Rebuild the engine's position from the current config + move record.
+    private func syncEngineToRecord() async {
+        await session.command(GtpCommandBuilder.boardSize(boardSize))
+        await session.command(GtpCommandBuilder.komi(komi))
+        await session.command(GtpCommandBuilder.setKoRule(koRule.gtpToken))
+        await session.command(GtpCommandBuilder.setScoringRule(scoringRule.gtpToken))
+        await session.command(GtpCommandBuilder.clearBoard)
+        if !handicapStones.isEmpty {
+            await session.command(GtpCommandBuilder.fixedHandicap(handicapStones.count))
+        }
+        for m in moves {
+            if m.isPass {
+                await session.command(GtpCommandBuilder.play(color: gtp(m.color), pass: true))
+            } else {
+                await session.command(GtpCommandBuilder.play(color: gtp(m.color), x: m.x, yFromTop: m.y, size: boardSize))
+            }
+        }
+    }
+
+    /// Decide what to do next: play the AI's move, refresh analysis, or nothing.
     private func advance() async {
         guard modelReady else { return }
         if gameOver {
             statusMessage = gameResultText ?? "Game over"
             return
         }
-
-        // While reviewing a past position, never mutate the live game; just
-        // (optionally) analyze what's on screen.
-        if isReviewing {
-            if analysisEnabled { await runAnalysis() }
-            return
-        }
+        if isReviewing { return }   // review is render-only; don't disturb the engine
 
         if currentPlayerKind == .ai {
             await playAIMove()
@@ -352,139 +391,124 @@ final class GameState {
     }
 
     private func playAIMove() async {
-        guard let mcts else { return }
         let gen = generation
         thinking = true
         statusMessage = "\(sideToMove == .black ? "Black" : "White") (AI) thinking…"
         defer { thinking = false }
 
-        let result = await mcts.search(rootBridge: bridge, playouts: aiPlayouts) {
-            gen == self.generation
-        }
-        guard gen == generation else { return } // superseded
-        guard let result else {
-            statusMessage = "Engine error"
-            return
-        }
+        let color = sideToMove
+        await session.command(GtpCommandBuilder.setMaxVisits(GtpCommandBuilder.unboundedMaxVisits))
+        await session.command(GtpCommandBuilder.setMaxTime(aiMaxTime))
+        let vertex = await session.genMove(color: gtp(color))
+        guard gen == generation else { return }   // superseded by a user action
+        guard let vertex else { statusMessage = "Engine error"; return }
 
-        if analysisEnabled { analysis = nnResult(from: result) }
-
-        if let pos = result.bestMove {
-            let x = pos % boardSize, y = pos / boardSize
-            if !bridge.playX(Int32(x), y: Int32(y), color: sideToMove) {
-                bridge.pass(for: sideToMove) // fallback if somehow illegal
-            }
+        let up = vertex.uppercased()
+        if up == "PASS" || up == "RESIGN" {
+            moves.append(.pass(color))
+        } else if let pos = GtpAnalysisParser.vertexToPosition(up, size: boardSize) {
+            moves.append(.play(color, pos % boardSize, pos / boardSize))
         } else {
-            bridge.pass(for: sideToMove)
+            moves.append(.pass(color))
         }
         generation += 1
-        refreshFromBridge()
-        await advance() // chain AI-vs-AI or refresh human-turn analysis
+        refreshFromRecord()
+        await advance()   // chain AI-vs-AI or refresh human-turn analysis
     }
 
     private func runAnalysis() async {
-        guard let mcts else { return }
         analysisTask?.cancel()
         let gen = generation
-        let rootBridge = activeBridge
         let task = Task { @MainActor in
-            guard let result = await mcts.search(rootBridge: rootBridge, playouts: self.analysisPlayouts, shouldContinue: {
-                gen == self.generation && !Task.isCancelled
-            }) else { return }
-            guard gen == self.generation else { return }
-            self.analysis = self.nnResult(from: result)
-            self.statusMessage = self.searchSummary(result)
+            guard let parsed = await session.analyzeOnce(interval: 20, maxMoves: analysisMaxMoves, timeout: 20) else { return }
+            guard gen == self.generation, !Task.isCancelled else { return }
+            self.analysis = self.nnResult(from: parsed)
+            self.statusMessage = self.analysisSummary(parsed)
         }
         analysisTask = task
         await task.value
     }
 
-    /// Fill features from the bridge (cheap, main-actor) and evaluate on the engine.
-    private func evaluateCurrent() async -> NNResult? {
+    /// Map an analyze report onto NNResult so AnalysisOverlay + the win-rate bar
+    /// render unchanged. Winrate/lead/ownership are converted to the perspective
+    /// the UI expects (to-move winrate; White-perspective ownership as before).
+    private func nnResult(from a: GtpAnalysis) -> NNResult {
         let area = boardSize * boardSize
-        var spatial = [Float](repeating: 0, count: NNModel.numSpatialFeatures * area)
-        var global = [Float](repeating: 0, count: NNModel.numGlobalFeatures)
-        spatial.withUnsafeMutableBufferPointer { sp in
-            global.withUnsafeMutableBufferPointer { gp in
-                bridge.fillSpatial(sp.baseAddress!, global: gp.baseAddress!)
-            }
+        // Candidate policy as visit-share over board positions.
+        var policy = [Float](repeating: 0, count: area)
+        var passPolicy: Float = 0
+        let totalVisits = max(1, a.candidates.reduce(0) { $0 + $1.visits })
+        for c in a.candidates {
+            let share = Float(c.visits) / Float(totalVisits)
+            if let p = c.position, p >= 0, p < area { policy[p] = share } else { passPolicy = share }
         }
-        // Legal mask: board positions then pass (always legal).
-        var legalMask = [Bool](repeating: false, count: area + 1)
-        for y in 0..<boardSize {
-            for x in 0..<boardSize {
-                legalMask[y * boardSize + x] = bridge.isLegalX(Int32(x), y: Int32(y), color: sideToMove)
-            }
-        }
-        legalMask[area] = true
         let blackToMove = sideToMove == .black
-        return try? await engine.evaluate(spatial: spatial, global: global, legalMask: legalMask, blackToMove: blackToMove)
+        // Engine emits winrate/lead from White's perspective; convert to to-move.
+        let rootWhiteWin = a.rootWinrateWhite ?? 0.5
+        let winToMove = blackToMove ? (1 - rootWhiteWin) : rootWhiteWin
+        let whiteLead = a.rootScoreLeadWhite ?? 0
+        return NNResult(policy: policy,
+                        passPolicy: passPolicy,
+                        winProbToMove: winToMove,
+                        noResultProb: 0,
+                        whiteScoreMean: whiteLead,
+                        whiteLead: whiteLead,
+                        whiteOwnership: a.ownershipWhite.count == area ? a.ownershipWhite : [Float](repeating: 0, count: area))
     }
 
-    private func bestPolicyMove(_ r: NNResult) -> (Int?, Float) {
-        var best = -1
-        var bestProb: Float = -1
-        for pos in 0..<r.policy.count where r.policy[pos] > bestProb {
-            bestProb = r.policy[pos]
-            best = pos
-        }
-        return (best >= 0 ? best : nil, max(bestProb, 0))
-    }
-
-    /// Map search output onto NNResult so AnalysisOverlay renders visit-based
-    /// candidates without any view changes.
-    private func nnResult(from s: SearchResult) -> NNResult {
-        let blackToMove = sideToMove == .black
-        return NNResult(
-            policy: s.policy,
-            passPolicy: s.passPolicy,
-            winProbToMove: blackToMove ? s.blackWinProb : 1 - s.blackWinProb,
-            noResultProb: 0,
-            whiteScoreMean: s.whiteLead,
-            whiteLead: s.whiteLead,
-            whiteOwnership: s.whiteOwnership
-        )
-    }
-
-    private func searchSummary(_ s: SearchResult) -> String {
-        let pct = Int((s.blackWinProb * 100).rounded())
-        let leadStr = String(format: "%+.1f", s.whiteLead)
-        return "B \(pct)%  ·  W lead \(leadStr)  ·  \(s.playouts) po"
+    private func analysisSummary(_ a: GtpAnalysis) -> String {
+        let blackWin = sideToMove == .black ? (1 - (a.rootWinrateWhite ?? 0.5)) : (a.rootWinrateWhite ?? 0.5)
+        let pct = Int((blackWin * 100).rounded())
+        let leadStr = String(format: "%+.1f", a.rootScoreLeadWhite ?? 0)
+        let visits = a.rootVisits ?? 0
+        return "B \(pct)%  ·  W lead \(leadStr)  ·  \(visits) visits"
     }
 
     // MARK: - Sync
 
-    /// The bridge that should drive rendering: the review snapshot if we're
-    /// looking at a past position, otherwise the live game.
-    private var activeBridge: GoBridge { reviewBridge ?? bridge }
+    /// Recompute all observable board state from the move record at `currentPly`.
+    private func refreshFromRecord() {
+        let pos = GoReplayKit.position(size: boardSize, handicap: handicapStones,
+                                       moves: moves, plyLimit: currentPly)
+        stones = GoReplayKit.cells(pos)
+        blackCaptures = Int(pos.blackCaptures)
+        whiteCaptures = Int(pos.whiteCaptures)
+        lastMove = pos.lastMoveX >= 0 ? (Int(pos.lastMoveX), Int(pos.lastMoveY)) : nil
+        moveCount = currentPly
+        totalMoves = moves.count
+        currentPly = min(currentPly, totalMoves)
 
-    private func refreshFromBridge() {
-        let b = activeBridge
-        for y in 0..<boardSize {
-            for x in 0..<boardSize {
-                stones[y * boardSize + x] = b.stoneColor(atX: Int32(x), y: Int32(y))
-            }
-        }
-        sideToMove = b.sideToMove
-        blackCaptures = Int(b.blackCaptures)
-        whiteCaptures = Int(b.whiteCaptures)
-        moveCount = b.moveCount
-        totalMoves = bridge.moveCount        // the live tip, regardless of review
-        currentPly = b.moveCount
-        var lx: Int32 = -1, ly: Int32 = -1
-        b.lastMoveX(&lx, y: &ly)
-        lastMove = lx >= 0 ? (Int(lx), Int(ly)) : nil
-        gameOver = b.gameFinished
-        gameResultText = gameOver ? resultText(b) : nil
+        // Side to move at the viewed ply: base color flipped by the moves applied.
+        let baseIsWhite = !handicapStones.isEmpty       // handicap → White opens
+        let flips = currentPly % 2 == 1
+        sideToMove = (baseIsWhite != flips) ? .white : .black
+
+        // Game over: two consecutive passes at the live tip (area rules).
+        gameOver = detectGameOver()
+        gameResultText = nil
+        if gameOver { Task { await computeResult() } }
     }
 
-    private func resultText(_ bridge: GoBridge) -> String {
-        if bridge.isNoResult { return "No result" }
-        let score = bridge.finalWhiteMinusBlackScore
-        switch bridge.winner {
-        case .black: return String(format: "Black wins by %.1f", -score)
-        case .white: return String(format: "White wins by %.1f", score)
-        default: return "Draw"
-        }
+    private func detectGameOver() -> Bool {
+        guard currentPly == moves.count, moves.count >= 2 else { return false }
+        return moves[moves.count - 1].isPass && moves[moves.count - 2].isPass
+    }
+
+    /// Ask the engine for the final score once the game ends.
+    private func computeResult() async {
+        guard modelReady else { return }
+        let reply = await session.command("final_score")
+        guard reply.ok, let text = reply.lines.first else { return }
+        gameResultText = Self.humanResult(text)
+        statusMessage = gameResultText ?? "Game over"
+    }
+
+    /// Turn a GTP `final_score` reply ("B+3.5", "W+2.5", "0") into display text.
+    static func humanResult(_ score: String) -> String {
+        let s = score.trimmingCharacters(in: .whitespaces)
+        if s == "0" { return "Draw" }
+        if s.hasPrefix("B+") { return "Black wins by \(s.dropFirst(2))" }
+        if s.hasPrefix("W+") { return "White wins by \(s.dropFirst(2))" }
+        return s
     }
 }

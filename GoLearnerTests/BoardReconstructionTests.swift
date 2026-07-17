@@ -7,6 +7,7 @@
 //
 
 import XCTest
+@testable import GoLearner
 
 @MainActor
 final class BoardReconstructionTests: XCTestCase {

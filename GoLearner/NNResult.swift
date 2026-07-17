@@ -2,13 +2,13 @@
 //  NNResult.swift
 //  GoLearner
 //
-//  Value types shared by the Core ML model and the search. Kept free of any
-//  CoreML dependency so the search + these types can compile into the
-//  standalone (hostless) test bundle alongside the C++ bridge.
+//  The analysis view-model the board overlay + win-rate bar render. Populated
+//  from the engine's kata-analyze output (see GameState.nnResult(from:)). Kept
+//  free of any engine/CoreML dependency so it also compiles into the test bundle.
 //
 
-/// Decoded result of one network evaluation, from the perspective of the
-/// player to move unless noted otherwise.
+/// Decoded analysis of one position, from the perspective of the player to move
+/// unless noted otherwise.
 struct NNResult {
     /// Policy probabilities over board positions (index = y*size + x), already
     /// masked to legal moves and normalized. Length = size*size.
@@ -25,11 +25,4 @@ struct NNResult {
     var whiteLead: Float
     /// Ownership map from White's perspective, tanh'd to [-1, 1]. Length = size*size.
     var whiteOwnership: [Float]
-}
-
-/// Abstraction over one NN evaluation, so search can be tested with a fake.
-/// `Sendable` so it can be held by the `@MainActor` search and its `evaluate`
-/// awaited on the `GoEngine` actor without tripping strict concurrency.
-protocol PositionEvaluator: Sendable {
-    func evaluate(spatial: [Float], global: [Float], legalMask: [Bool], blackToMove: Bool) async throws -> NNResult
 }

@@ -14,9 +14,20 @@
 import Foundation
 
 final class InProcessKataGoEngine: KataGoEngineIO, @unchecked Sendable {
+    /// Guards against launching more than one engine per process (the engine and
+    /// its GTP I/O buffers are process-global).
+    nonisolated(unsafe) private static var launched = false
+    private static let launchLock = NSLock()
+
     /// Launch the engine once. `modelPath`/`configPath` point at the bundled
-    /// `.bin.gz` net and `default_gtp.cfg`. Safe to call once per process.
+    /// `.bin.gz` net and `default_gtp.cfg`. Idempotent: safe to call from both
+    /// the app's GameState and a hosted test — the second call is a no-op.
     static func launch(modelPath: String, configPath: String) {
+        launchLock.lock()
+        if launched { launchLock.unlock(); return }
+        launched = true
+        launchLock.unlock()
+
         let homeDataDir = NSTemporaryDirectory() + "katago-home"
         try? FileManager.default.createDirectory(atPath: homeDataDir,
                                                  withIntermediateDirectories: true)

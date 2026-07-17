@@ -8,8 +8,8 @@
 //  GoColor — no SwiftUI or CoreML — so it also compiles into the hostless test
 //  bundle and the encode step runs off the main actor.
 //
-//  P0-independent: frames come straight from the bridge's replayed positions,
-//  so this survives the engine pivot untouched.
+//  Frames come from GoReplay's stateless replay (GameState.gifFrames), so this
+//  never touches the single per-process GTP engine.
 //
 
 import Foundation
@@ -61,27 +61,18 @@ enum GameGIF {
 
     enum GIFError: Error { case contextFailed, destinationFailed, finalizeFailed }
 
-    // MARK: - Frame extraction (main actor: touches the bridge)
+    // MARK: - Frame extraction (stateless replay via GoReplay)
 
-    /// Snapshot every position from the empty board through the final move.
-    /// Returns `moveCount + 1` frames.
-    @MainActor
-    static func frames(from bridge: GoBridge) -> [Frame] {
-        let n = Int(bridge.boardSize)
-        let total = bridge.moveCount
+    /// Snapshot every position (base → final move) as GIF frames, by replaying
+    /// `moves` (after `handicap`) with KataGo's rules. Returns `moves.count + 1`
+    /// frames. Engine-free and thread-safe.
+    static func frames(size: Int, handicap: [SGFPoint], moves: [ReplayMove]) -> [Frame] {
         var out: [Frame] = []
-        out.reserveCapacity(total + 1)
-        for ply in 0...total {
-            let snap = bridge.snapshot(atPly: ply)
-            var cells = [UInt8](repeating: 0, count: n * n)
-            for y in 0..<n {
-                for x in 0..<n {
-                    cells[y * n + x] = UInt8(snap.stoneColor(atX: Int32(x), y: Int32(y)).rawValue)
-                }
-            }
-            var lx: Int32 = -1, ly: Int32 = -1
-            snap.lastMoveX(&lx, y: &ly)
-            out.append(Frame(cells: cells, lastMove: lx >= 0 ? (Int(lx), Int(ly)) : nil))
+        out.reserveCapacity(moves.count + 1)
+        for ply in 0...moves.count {
+            let pos = GoReplayKit.position(size: size, handicap: handicap, moves: moves, plyLimit: ply)
+            let last: (x: Int, y: Int)? = pos.lastMoveX >= 0 ? (Int(pos.lastMoveX), Int(pos.lastMoveY)) : nil
+            out.append(Frame(cells: [UInt8](pos.cells), lastMove: last))
         }
         return out
     }

@@ -7,6 +7,7 @@
 //
 
 import XCTest
+@testable import GoLearner
 
 final class SGFTests: XCTestCase {
 
