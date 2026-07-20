@@ -112,4 +112,18 @@ final class SGFTests: XCTestCase {
         XCTAssertFalse(sgf.contains("HA["))
         XCTAssertFalse(sgf.contains("AB["))
     }
+
+    func testRoundTripPreservesSubNineteenHandicap() throws {
+        // A 9×9 handicap game must persist its sub-19 setup stones so reloads
+        // keep the engine + display in sync (see HandicapPoints).
+        let stones = HandicapPoints.fixed(count: 4, boardSize: 9)
+        let original = SGFGame(boardSize: 9, komi: 0.5,
+                               moves: [.play(.white, 4, 4)],
+                               handicap: 4, setupBlack: stones)
+        let decoded = try SGF.parse(SGF.serialize(original))
+        XCTAssertEqual(decoded.boardSize, 9)
+        XCTAssertEqual(decoded.handicap, 4)
+        XCTAssertEqual(decoded.setupBlack, stones)
+        XCTAssertEqual(decoded.moves, original.moves)
+    }
 }

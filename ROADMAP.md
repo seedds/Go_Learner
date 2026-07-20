@@ -19,8 +19,9 @@ review, GIF, thumbnails via the stateless `GoReplay` rules bridge).
 - ✅ **A1** move navigation + win-rate bar
 - ✅ **A2** SGF import/export (custom Swift codec; native `loadsgf`/`printsgf` available post-P0)
 - ✅ **A3** local game library (SwiftData) + autosave
-- 🔸 **A4a** rules/komi + player assignment + New Game sheet (19×19 only)
-- ⏳ **A4b** sub-19 board sizes — now unblocked (engine masks natively via `rectangular_boardsize`)
+- ✅ **A4a** rules/komi + player assignment + New Game sheet
+- ✅ **A4b** sub-19 board sizes (9/13/19) — engine masks the fixed 37-wide NN
+  buffer natively; per-game size in `GameState`, size picker + per-size komi
 - ✅ **handicap** — fixed placement + SGF `AB`/`HA`/`PL` round-trip
 - ✅ **R7** GIF export
 
@@ -28,11 +29,13 @@ Test suite: **41 tests, 0 failures** (host-based; incl. a live-engine smoke
 test); runtime self-check `genmove=Q16 (15,3)` (3-4 corner) verified in the sim.
 
 ### Deviations discovered during implementation
-- **A4 split (a/b).** The bundled Core ML model input is hard-pinned to
-  `[1,22,19,19]`. Smaller boards need KataGo's 19×19-buffer masking, which is a
-  correctness-critical rework of the bridge fill + `NNModel.decode` + `MCTS`
-  legal-mask + pass index (`area` vs `361`), gated per size by the runtime
-  corner-move check. Split out as **A4b**; **A4a** shipped on 19×19.
+- **A4 split (a/b).** Under the *old* pre-P0 slice, the bundled Core ML model
+  input was hard-pinned to `[1,22,19,19]`, so smaller boards would have needed a
+  correctness-critical decode rework — hence the a/b split. The **P0 engine
+  pivot obsoleted this**: the full KataGo engine converts to a fixed 37-wide NN
+  tensor with a live mask channel and `requireExactNNLen=false`, masking any
+  2…37 board natively. A4b then became pure Swift app-layer work (per-game size
+  + picker + handicap table + SGF adopt), no bridge/decode changes.
 - **Handicap deferred.** Because A3 autosaves via SGF, handicap must persist as
   SGF setup stones (`AB`/`HA`/`PL`) through the bridge + parser + reconstruction;
   otherwise reloads silently drop stones and desync turn order. Pulled out of
@@ -95,12 +98,17 @@ Implemented on the current architecture (no P0 dependency).
   parse, Share sheet + file importer. *(native KataGo SGF swaps in at P0.)*
 - ✅ **A3. Local game library** — SwiftData (`SavedGame`), split-view list,
   Canvas thumbnails, autosave, swipe-delete, store-load fallback. No iCloud.
-- 🔸 **A4a. Rules/komi + players + New Game sheet (19×19)** — ko/scoring pickers,
+- ✅ **A4a. Rules/komi + players + New Game sheet** — ko/scoring pickers,
   komi stepper, per-side Human/AI; rules persisted on `SavedGame`. Bridge:
   `reset(…koRule:scoringRule:)`.
-- ⏳ **A4b. Sub-19 board sizes** — 9/13 via the fixed 19×19 NN buffer + masking;
-  correctness-critical decode rework (see deviations). Gated per size by the
-  runtime corner-move check.
+- ✅ **A4b. Sub-19 board sizes (9/13/19)** — the full engine masks its fixed
+  37-wide NN buffer down to the requested size (`requireExactNNLen=false`), so
+  no decode rework was needed after the P0 pivot (the "19×19-only" note below
+  predates it). `GameState` holds a per-game `boardSize`, rebuilding its
+  `GameSession` on change; `NewGameView` adds a size picker + per-size komi;
+  `HandicapPoints` mirrors the engine's `placeFixedHandicap` for every size;
+  `importSGF` adopts the SGF's size. Gate: sub-19 `genmove`/`final_score` smoke
+  test + a runtime sim check.
 - ✅ **Handicap** — fixed-handicap placement + SGF `AB`/`HA`/`PL` round-trip
   through bridge (`setupHandicap`), parser, and reconstruction.
 
@@ -136,8 +144,8 @@ Shipped: `A1 → A2 → A3 → A4a → handicap → R7` (on the old arch) → **
 pivot, which also delivered R3 + R1's converter).
 
 Remaining, recommended order:
-`A4b (sub-19, now unblocked) → R2 (downloadable nets) → R1-cache → R4 (GTP
-console, nearly free) → R5 (human-SL profiles) → R6 (photo import) → R3-picker`.
+`R2 (downloadable nets) → R1-cache → R4 (GTP console, nearly free) → R5
+(human-SL profiles) → R6 (photo import) → R3-picker`.
 
 ## Explicitly deferred
 iCloud/CloudKit sync, Watch/TV/Mac/Vision targets, widgets, opening books,

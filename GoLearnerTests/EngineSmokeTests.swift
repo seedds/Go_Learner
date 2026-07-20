@@ -86,4 +86,43 @@ final class EngineSmokeTests: XCTestCase {
             XCTAssertLessThan(wr, 0.8)
         }
     }
+
+    /// A4b gate: the engine masks its fixed NN buffer down to sub-19 boards, so
+    /// `boardsize 9` / `boardsize 13` must produce a legal on-board opening. The
+    /// 19×19 "≥2 lines from the edge" heuristic doesn't apply on small boards
+    /// (3-3 and tengen are normal openings there), so we only require a real
+    /// on-board move. Then we score a *finished* game (two passes) — the only
+    /// way the app scores (`GameState.computeResult`), which takes KataGo's
+    /// cheap area-scoring branch rather than an unfinished-game nested search.
+    func testSubNineteenGenmoveAndScore() async throws {
+        let session = await sharedSession()
+        for size in [9, 13] {
+            await session.command(GtpCommandBuilder.boardSize(size))
+            await session.command(GtpCommandBuilder.clearBoard)
+
+            guard let vertex = await session.genMove(color: "B") else {
+                XCTFail("\(size): genmove returned nil"); continue
+            }
+            let up = vertex.uppercased()
+            XCTAssertNotEqual(up, "PASS", "\(size): engine passed on the opening move")
+            XCTAssertNotEqual(up, "RESIGN", "\(size): engine resigned on the opening move")
+
+            guard let pos = GtpAnalysisParser.vertexToPosition(up, size: size) else {
+                XCTFail("\(size): unparseable opening vertex: \(vertex)"); continue
+            }
+            let x = pos % size, y = pos / size
+            XCTAssertTrue((0..<size).contains(x) && (0..<size).contains(y),
+                          "\(size): opening move off board: \(vertex)")
+
+            // Finish the game (B already moved via genmove; W + B pass) so
+            // final_score uses the finished-game branch, as the app does.
+            await session.command(GtpCommandBuilder.play(color: "W", pass: true))
+            await session.command(GtpCommandBuilder.play(color: "B", pass: true))
+            let score = await session.command("final_score")
+            XCTAssertTrue(score.ok, "\(size): final_score should return an ok reply")
+        }
+        // Leave the shared engine back on 19×19 for any later test ordering.
+        await session.command(GtpCommandBuilder.boardSize(19))
+        await session.command(GtpCommandBuilder.clearBoard)
+    }
 }

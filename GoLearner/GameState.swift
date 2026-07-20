@@ -57,7 +57,10 @@ enum ScoringRule: Int, CaseIterable, Identifiable {
 @Observable
 final class GameState {
     // MARK: Configuration
-    let boardSize: Int
+    /// Board dimension for the current game. Mutable across games (a new game or
+    /// an SGF import can switch sizes); the engine masks the fixed 37-wide NN
+    /// buffer down to this size, so any 2…37 board is supported.
+    private(set) var boardSize: Int
     private(set) var komi: Float
     private(set) var koRule: KoRule = .positional
     private(set) var scoringRule: ScoringRule = .area
@@ -104,7 +107,9 @@ final class GameState {
     private(set) var modelReady: Bool = false
 
     // MARK: Engine + record
-    private let session: GameSession
+    /// Rebuilt when the board size changes (the actor's size is immutable); the
+    /// underlying process-global engine is launched once and reused.
+    private var session: GameSession
     /// The live game's move record (the tip). Rendering/review replay from this.
     private var moves: [ReplayMove] = []
     private var analysisTask: Task<Void, Never>? = nil
@@ -149,6 +154,17 @@ final class GameState {
             InProcessKataGoEngine.launch(modelPath: modelPath, configPath: configPath)
         }
         return GameSession(engine: InProcessKataGoEngine(), boardSize: boardSize)
+    }
+
+    /// Switch the game to a new board size: rebuild the session (its size is
+    /// immutable) against the already-launched engine and resize the render
+    /// buffer. Caller is responsible for resetting the engine to the new record.
+    private func adoptBoardSize(_ size: Int) {
+        guard size != boardSize else { return }
+        boardSize = size
+        stones = Array(repeating: .empty, count: size * size)
+        session = GameState.makeSession(boardSize: size,
+                                        launchEngine: !GameState.isRunningUnderTests)
     }
 
     private func warmUp() async {
@@ -197,12 +213,13 @@ final class GameState {
         Task { await resetEngineAndAdvance() }
     }
 
-    /// Start a fresh game with new komi/rules and player assignment. Board size
-    /// is fixed for the app's lifetime (the bundled net is 19×19). A `handicap`
-    /// of 2…9 places fixed black stones and makes White move first.
-    func configureNewGame(komi: Float, koRule: KoRule, scoringRule: ScoringRule,
+    /// Start a fresh game with new board size, komi/rules and player assignment.
+    /// The engine masks its fixed NN buffer to `size`, so 9/13/19 are supported.
+    /// A `handicap` of 2…9 places fixed black stones and makes White move first.
+    func configureNewGame(size: Int, komi: Float, koRule: KoRule, scoringRule: ScoringRule,
                           blackPlayer: PlayerKind, whitePlayer: PlayerKind,
                           handicap: Int = 0) {
+        adoptBoardSize(size)
         self.komi = komi
         self.koRule = koRule
         self.scoringRule = scoringRule
@@ -305,11 +322,13 @@ final class GameState {
         return SGF.serialize(game)
     }
 
-    /// Replace the live game with the main line parsed from `text`. Returns false
-    /// if the SGF board size differs from this game's size.
+    /// Replace the live game with the main line parsed from `text`, adopting the
+    /// SGF's board size (a saved 9×9 game loads into a 19×19 state and vice
+    /// versa). Returns false only if the SGF can't be parsed.
     @discardableResult
     func importSGF(_ text: String, koRule: KoRule? = nil, scoringRule: ScoringRule? = nil) -> Bool {
-        guard let parsed = try? SGF.parse(text), parsed.boardSize == boardSize else { return false }
+        guard let parsed = try? SGF.parse(text) else { return false }
+        adoptBoardSize(parsed.boardSize)
         komi = parsed.komi
         if let koRule { self.koRule = koRule }
         if let scoringRule { self.scoringRule = scoringRule }

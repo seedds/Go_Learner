@@ -60,13 +60,53 @@ final class HandicapPointsTests: XCTestCase {
         XCTAssertTrue(HandicapPoints.fixed(count: 1, boardSize: 19).isEmpty)
         XCTAssertTrue(HandicapPoints.fixed(count: 10, boardSize: 19).isEmpty)
         XCTAssertTrue(HandicapPoints.fixed(count: 0, boardSize: 19).isEmpty)
-        XCTAssertTrue(HandicapPoints.fixed(count: 4, boardSize: 13).isEmpty, "only 19×19 for now")
+        // Boards below 7 have no fixed-handicap layout (matches the engine).
+        XCTAssertTrue(HandicapPoints.fixed(count: 2, boardSize: 6).isEmpty)
     }
 
     func testNoDuplicatePoints() {
-        for h in 2...9 {
-            let pts = HandicapPoints.fixed(count: h, boardSize: 19)
-            XCTAssertEqual(set(pts).count, pts.count, "H\(h) has duplicates")
+        for n in [9, 13, 19] {
+            for h in 2...9 {
+                let pts = HandicapPoints.fixed(count: h, boardSize: n)
+                XCTAssertEqual(set(pts).count, pts.count, "\(n): H\(h) has duplicates")
+            }
+        }
+    }
+
+    // MARK: Sub-19 placement (must match the engine's PlayUtils::placeFixedHandicap)
+
+    func testNineByNineCornersAndTengen() {
+        // near=2, far=6, mid=4 for a 9×9 board.
+        XCTAssertEqual(set(HandicapPoints.fixed(count: 4, boardSize: 9)),
+                       set([SGFPoint(x: 2, y: 2), SGFPoint(x: 6, y: 2),
+                            SGFPoint(x: 2, y: 6), SGFPoint(x: 6, y: 6)]))
+        XCTAssertTrue(HandicapPoints.fixed(count: 5, boardSize: 9).contains(SGFPoint(x: 4, y: 4)),
+                      "H5 on 9×9 should include tengen (4,4)")
+    }
+
+    func testThirteenByThirteenCorners() {
+        // near=3, far=9, mid=6 for a 13×13 board.
+        XCTAssertEqual(set(HandicapPoints.fixed(count: 4, boardSize: 13)),
+                       set([SGFPoint(x: 3, y: 3), SGFPoint(x: 9, y: 3),
+                            SGFPoint(x: 3, y: 9), SGFPoint(x: 9, y: 9)]))
+    }
+
+    func testCountsMatchHandicapAcrossSizes() {
+        for n in [9, 13, 19] {
+            for h in 2...9 {
+                XCTAssertEqual(HandicapPoints.fixed(count: h, boardSize: n).count, h, "\(n): H\(h)")
+            }
+        }
+    }
+
+    func testSubNineteenPointsAreOnBoard() {
+        for n in [9, 13] {
+            for h in 2...9 {
+                for p in HandicapPoints.fixed(count: h, boardSize: n) {
+                    XCTAssertTrue((0..<n).contains(p.x) && (0..<n).contains(p.y),
+                                  "\(n): H\(h) point (\(p.x),\(p.y)) off board")
+                }
+            }
         }
     }
 }

@@ -39,7 +39,8 @@ struct RootView: View {
     }
 
     private var currentConfig: NewGameConfig {
-        NewGameConfig(komi: game.komi, koRule: game.koRule, scoringRule: game.scoringRule,
+        NewGameConfig(size: game.boardSize, komi: game.komi, koRule: game.koRule,
+                      scoringRule: game.scoringRule,
                       blackPlayer: game.blackPlayer, whitePlayer: game.whitePlayer,
                       handicap: game.handicapStones.count)
     }
@@ -59,7 +60,7 @@ struct RootView: View {
 
     /// Configure the live game, then create a fresh saved row to autosave into.
     private func startNewGame(_ config: NewGameConfig) {
-        game.configureNewGame(komi: config.komi, koRule: config.koRule,
+        game.configureNewGame(size: config.size, komi: config.komi, koRule: config.koRule,
                               scoringRule: config.scoringRule,
                               blackPlayer: config.blackPlayer, whitePlayer: config.whitePlayer,
                               handicap: config.handicap)

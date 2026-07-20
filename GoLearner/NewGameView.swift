@@ -2,14 +2,19 @@
 //  NewGameView.swift
 //  GoLearner
 //
-//  Sheet for starting a new game: komi, ko/scoring rules, and which side each
-//  player (Human/AI) takes. Board size is fixed at 19×19 (the bundled model's
-//  input geometry); a size picker arrives with multi-size support.
+//  Sheet for starting a new game: board size, komi, ko/scoring rules, and which
+//  side each player (Human/AI) takes. The engine masks its fixed NN buffer to
+//  the chosen size, so 9/13/19 all work with the bundled net.
 //
 
 import SwiftUI
 
 struct NewGameConfig {
+    /// Board sizes offered in the picker (all odd + ≥9, so every handicap 2…9
+    /// is placeable — see HandicapPoints).
+    static let sizes = [9, 13, 19]
+
+    var size: Int = 19
     var komi: Float = 7.5
     var koRule: KoRule = .positional
     var scoringRule: ScoringRule = .area
@@ -31,7 +36,9 @@ struct NewGameView: View {
         NavigationStack {
             Form {
                 Section("Board") {
-                    LabeledContent("Size", value: "19 × 19")
+                    Picker("Size", selection: $config.size) {
+                        ForEach(NewGameConfig.sizes, id: \.self) { Text("\($0) × \($0)").tag($0) }
+                    }
                     Picker("Handicap", selection: $config.handicap) {
                         Text("None").tag(0)
                         ForEach(Array(HandicapPoints.range), id: \.self) { Text("\($0) stones").tag($0) }
@@ -58,6 +65,7 @@ struct NewGameView: View {
                 }
             }
             .navigationTitle("New Game")
+            .onChange(of: config.size) { _, new in applySizeKomi(new) }
             .onChange(of: config.handicap) { _, new in applyHandicapKomi(new) }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -68,6 +76,17 @@ struct NewGameView: View {
                 }
             }
         }
+    }
+
+    /// The conventional even-game komi for a board size (area scoring).
+    private func defaultKomi(for size: Int) -> Float { size == 9 ? 7.0 : 7.5 }
+
+    /// Switching size resets komi to that size's convention. During a handicap
+    /// game komi stays at 0.5, but we update the remembered even-game komi so
+    /// toggling handicap off restores the new size's default.
+    private func applySizeKomi(_ size: Int) {
+        let def = defaultKomi(for: size)
+        if config.handicap > 0 { evenKomi = def } else { config.komi = def }
     }
 
     /// Handicap games conventionally use 0.5 komi; remember and restore the
