@@ -29,6 +29,11 @@ settings:
     # The vendored engine has upstream warnings (e.g. deprecated sprintf); don't
     # let them fail the build.
     GCC_WARN_INHIBIT_ALL_WARNINGS: YES
+    # The katago static lib's generated "Copy Swift Objective-C Interface Header"
+    # phase runs `ditto` into $(BUILT_PRODUCTS_DIR)/include/katago/. User-script
+    # sandboxing denies ditto's temp-file create there. Pin OFF so regeneration
+    # (and Xcode's "update to recommended settings") can't re-break the build.
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
 
 targets:
   # ---------------------------------------------------------------------------

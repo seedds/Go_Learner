@@ -231,6 +231,7 @@ final class GameState {
             return
         }
         moves.append(.play(color, x, y))
+        currentPly = moves.count   // live play follows the tip so the stone shows immediately
         generation += 1
         refreshFromRecord()
         Task {
@@ -243,6 +244,7 @@ final class GameState {
         guard !thinking, !isReviewing, !gameOver, currentPlayerKind == .human else { return }
         let color = sideToMove
         moves.append(.pass(color))
+        currentPly = moves.count   // live play follows the tip
         generation += 1
         refreshFromRecord()
         Task {
@@ -387,6 +389,8 @@ final class GameState {
             await playAIMove()
         } else if analysisEnabled {
             await runAnalysis()
+        } else {
+            statusMessage = "\(sideToMove == .black ? "Black" : "White") to play"
         }
     }
 
@@ -411,6 +415,7 @@ final class GameState {
         } else {
             moves.append(.pass(color))
         }
+        currentPly = moves.count   // live play follows the tip
         generation += 1
         refreshFromRecord()
         await advance()   // chain AI-vs-AI or refresh human-turn analysis
