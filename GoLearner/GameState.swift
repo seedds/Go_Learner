@@ -291,24 +291,46 @@ final class GameState {
         Task { await resetEngineAndAdvance() }
     }
 
-    /// Human tapping an intersection.
+    /// A tap on an intersection. At the live tip this plays the side-to-move's
+    /// move for a human player and lets the AI reply as usual. From a past
+    /// position it starts a new branch: it plays the stone for whichever color
+    /// is to move there (Human *or* AI), discards the moves that followed, and
+    /// then resumes normal play — so the AI moves again according to the player
+    /// settings for the new position.
     func humanPlay(x: Int, y: Int) {
-        guard !thinking, !isReviewing, !gameOver else { return }
-        guard currentPlayerKind == .human else { return }
+        guard !thinking, !gameOver else { return }
+        let branching = isReviewing
+        // At the tip, only a human-controlled side may tap; branching from the
+        // past can place either color to seed the new line.
+        guard branching || currentPlayerKind == .human else { return }
         let color = sideToMove
+        // Branch base: the moves up to the viewed ply (the whole line at the
+        // tip). Branching discards the later moves that are being replaced.
+        let base = branching ? Array(moves.prefix(currentPly)) : moves
         // GoReplay is the rules authority for legality (same rules as the engine)
         // and works even before the engine finishes loading.
         guard GoReplayKit.isLegal(size: boardSize, handicap: handicapStones,
-                                  moves: moves, candidate: .play(color, x, y)) else {
+                                  moves: base, candidate: .play(color, x, y)) else {
             statusMessage = "Illegal move"
             return
         }
+        moves = base
         moves.append(.play(color, x, y))
-        currentPly = moves.count   // live play follows the tip so the stone shows immediately
+        currentPly = moves.count   // play follows the tip so the stone shows immediately
         generation += 1
+        if branching {
+            analysisTask?.cancel()
+            analysis = nil
+        }
         refreshFromRecord()
         Task {
-            if modelReady { await session.command(GtpCommandBuilder.play(color: gtp(color), x: x, yFromTop: y, size: boardSize)) }
+            if modelReady {
+                if branching {
+                    await syncEngineToRecord()   // rebuild the engine to the branched line
+                } else {
+                    await session.command(GtpCommandBuilder.play(color: gtp(color), x: x, yFromTop: y, size: boardSize))
+                }
+            }
             await advance()
         }
     }
@@ -322,19 +344,6 @@ final class GameState {
         refreshFromRecord()
         Task {
             if modelReady { await session.command(GtpCommandBuilder.play(color: gtp(color), pass: true)) }
-            await advance()
-        }
-    }
-
-    func undo() {
-        guard !thinking, !moves.isEmpty else { return }
-        moves.removeLast()
-        generation += 1
-        analysisTask?.cancel()
-        analysis = nil
-        refreshFromRecord()
-        Task {
-            if modelReady { await session.command("undo") }
             await advance()
         }
     }
@@ -502,7 +511,7 @@ final class GameState {
     /// stays on and the position is unchanged. The reused search tree makes
     /// visits accumulate and win% converge across reports; stop at the visit cap
     /// so the tree's memory stays bounded. Runs as a detached task (non-blocking)
-    /// so it never stalls `advance()`; cancelled by any move/undo/toggle-off.
+    /// so it never stalls `advance()`; cancelled by any move/nav/toggle-off.
     private func runAnalysis() {
         analysisTask?.cancel()
         let gen = generation

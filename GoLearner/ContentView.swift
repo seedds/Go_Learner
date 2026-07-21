@@ -3,7 +3,7 @@
 //  GoLearner
 //
 //  Main screen: player capsules, the board, a status line, and the control
-//  strip (analysis toggle, pass, undo, new game).
+//  strip (analysis toggle, pass, new game).
 //
 
 import SwiftUI
@@ -130,9 +130,6 @@ struct ContentView: View {
                           label: "Analyze",
                           active: game.analysisEnabled) {
                 game.toggleAnalysis()
-            }
-            ControlButton(system: "arrow.uturn.backward", label: "Undo") {
-                game.undo()
             }
             ControlButton(system: "hand.raised", label: "Pass") {
                 game.humanPass()
