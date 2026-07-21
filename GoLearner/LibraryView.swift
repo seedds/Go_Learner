@@ -2,9 +2,10 @@
 //  LibraryView.swift
 //  GoLearner
 //
-//  The saved-games sidebar (NavigationSplitView) plus a compact vector board
-//  thumbnail. Selecting a game loads its SGF into the shared GameState; the
-//  autosave in RootView writes changes back to the selected row.
+//  The saved-games History tab plus a compact vector board thumbnail. Tapping a
+//  game loads its SGF into the shared GameState (via the RootView selection) and
+//  calls `onSelect` so RootView can switch to the Play tab; the autosave in
+//  RootView writes changes back to the selected row.
 //
 
 import SwiftUI
@@ -16,13 +17,20 @@ struct LibraryView: View {
 
     @Binding var selection: SavedGame?
     @Binding var showNewGame: Bool
+    /// Called after a game is chosen so the host can reveal the board (Play tab).
+    var onSelect: () -> Void
 
     var body: some View {
-        List(selection: $selection) {
+        List {
             ForEach(games) { saved in
-                NavigationLink(value: saved) {
+                Button {
+                    selection = saved
+                    onSelect()
+                } label: {
                     GameRow(saved: saved)
                 }
+                .buttonStyle(.plain)
+                .listRowBackground(saved == selection ? Color.accentColor.opacity(0.15) : nil)
             }
             .onDelete(perform: delete)
         }

@@ -2,19 +2,23 @@
 //  RootView.swift
 //  GoLearner
 //
-//  Hosts the library sidebar + board detail in a NavigationSplitView, loads a
-//  selected saved game into the shared GameState, and autosaves changes back
-//  to the selected row. Persistence (SwiftData) lives here, not in GameState.
+//  Hosts the app's three tabs — Play (the board), History (saved games), and
+//  Settings — loads a selected saved game into the shared GameState, and
+//  autosaves changes back to the selected row. Persistence (SwiftData) lives
+//  here, not in GameState.
 //
 
 import SwiftUI
 import SwiftData
 
 struct RootView: View {
+    private enum AppTab { case play, history, settings }
+
     @Environment(\.modelContext) private var context
     @Environment(GameState.self) private var game
     @Query(sort: \SavedGame.updatedAt, order: .reverse) private var games: [SavedGame]
 
+    @State private var tab: AppTab = .play
     @State private var selection: SavedGame?
     @State private var showNewGame = false
     /// Suppresses autosave while we're loading a game into GameState (loading
@@ -24,10 +28,19 @@ struct RootView: View {
     @State private var suppressLoad = false
 
     var body: some View {
-        NavigationSplitView {
-            LibraryView(selection: $selection, showNewGame: $showNewGame)
-        } detail: {
-            ContentView(showNewGame: $showNewGame)
+        TabView(selection: $tab) {
+            Tab("Play", systemImage: "circle.grid.cross", value: .play) {
+                ContentView(showNewGame: $showNewGame)
+            }
+            Tab("History", systemImage: "clock", value: .history) {
+                NavigationStack {
+                    LibraryView(selection: $selection, showNewGame: $showNewGame,
+                                onSelect: { tab = .play })
+                }
+            }
+            Tab("Settings", systemImage: "gearshape", value: .settings) {
+                SettingsView()
+            }
         }
         .task { ensureSelection() }
         .onChange(of: selection) { _, newValue in load(newValue) }
@@ -70,6 +83,7 @@ struct RootView: View {
         context.insert(saved)
         suppressLoad = true            // the live game is already configured
         selection = saved
+        tab = .play                    // show the freshly-started board
     }
 
     private func newGameName() -> String {
