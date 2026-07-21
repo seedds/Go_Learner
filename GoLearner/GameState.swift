@@ -393,6 +393,7 @@ final class GameState {
         // never desyncs from the engine.
         moves = GoReplayKit.legalMoves(size: boardSize, handicap: handicapStones,
                                        candidates: GoReplayKit.replayMoves(from: parsed.moves))
+        currentPly = moves.count   // open a loaded game at the latest move, not review mode
         generation += 1
         analysisTask?.cancel()
         analysis = nil
