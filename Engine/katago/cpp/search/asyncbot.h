@@ -1,6 +1,7 @@
 #ifndef SEARCH_ASYNCBOT_H_
 #define SEARCH_ASYNCBOT_H_
 
+#include "../core/largestackthread.h"
 #include "../search/search.h"
 
 class AsyncBot {
@@ -150,7 +151,7 @@ class AsyncBot {
   std::mutex controlMutex;
   std::condition_variable threadWaitingToSearch;
   std::condition_variable userWaitingForStop;
-  std::thread searchThread;
+  LargeStackThread searchThread;  // iOS 512KB default stack overflows in search; see largestackthread.h
 
   bool isRunning;
   bool isPondering;

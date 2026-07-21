@@ -5,6 +5,7 @@
 
 #include "../core/global.h"
 #include "../core/commontypes.h"
+#include "../core/largestackthread.h"
 #include "../core/logger.h"
 #include "../core/multithread.h"
 #include "../core/threadsafequeue.h"
@@ -235,7 +236,7 @@ class NNEvaluator {
   ModelPostProcessParams postProcessParams;
 
   int numServerThreadsEverSpawned;
-  std::vector<std::thread*> serverThreads;
+  std::vector<LargeStackThread*> serverThreads;  // run Swift/CoreML frames; iOS 512KB default is too small (largestackthread.h)
 
   const int maxBatchSize;
 

@@ -34,8 +34,10 @@ thumbnails) uses the stateless `GoReplay` — never a second engine.
 
 ### 2.1 Launch
 `InProcessKataGoEngine.launch(modelPath:configPath:)` starts `MainCmds::gtp` on a
-dedicated `Thread` with **`stackSize = 4096 * 256`** (1 MB — `ScoreValue::initTables()`
-overflows the default 512 KB stack). `KataGoGTP` rebinds the engine's global
+dedicated `Thread` with **`stackSize = 4096 * 2048`** (8 MB — `ScoreValue::initTables()`
+overflows the default 512 KB stack, and `final_score` runs a whole search inline on
+this thread). The engine's internal search/callback/NN-server `std::thread`s default
+to iOS's 512 KB, so they are spawned through `LargeStackThread` (4 MB). `KataGoGTP` rebinds the engine's global
 `cout`/`cin` to two thread-safe stream buffers, so Swift talks GTP without a
 subprocess (iOS forbids spawning one). Launch is idempotent and suppressed under
 XCTest (the test owns the engine).

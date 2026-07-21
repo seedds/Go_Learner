@@ -37,7 +37,7 @@ AsyncBot::AsyncBot(
    searchBegunCallback()
 {
   search = new Search(params,nnEval,l,randSeed);
-  searchThread = std::thread(searchThreadLoop,this,l);
+  searchThread = LargeStackThread(searchThreadLoop,this,l);
 }
 
 AsyncBot::AsyncBot(
@@ -57,7 +57,7 @@ AsyncBot::AsyncBot(
    searchBegunCallback()
 {
   search = new Search(params,nnEval,humanEval,l,randSeed);
-  searchThread = std::thread(searchThreadLoop,this,l);
+  searchThread = LargeStackThread(searchThreadLoop,this,l);
 }
 
 AsyncBot::~AsyncBot() {
@@ -484,9 +484,11 @@ void AsyncBot::internalSearchThreadLoop() {
       }
     };
 
-    std::thread callbackLoopThread;
+    // Runs getAnalysisData (~44KB frames) + ownership-tree recursion; the iOS
+    // 512KB default stack is too small. See core/largestackthread.h.
+    LargeStackThread callbackLoopThread;
     if(usingCallbackLoop) {
-      callbackLoopThread = std::thread(callbackLoop);
+      callbackLoopThread = LargeStackThread(callbackLoop);
     }
 
     std::function<bool()> shouldStopEarly = [this]() noexcept {

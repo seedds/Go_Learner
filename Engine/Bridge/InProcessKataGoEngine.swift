@@ -39,8 +39,13 @@ final class InProcessKataGoEngine: KataGoEngineIO, @unchecked Sendable {
         let devices: [NSNumber] = [0, 100]
         #endif
 
-        // The engine's ScoreValue::initTables() overflows the default 512KB
-        // thread stack; pin 1MB like the reference (thread.stackSize=4096*256).
+        // This thread runs the GTP command loop. Beyond ScoreValue::initTables()
+        // (which overflows the default 512KB stack), some GTP commands run a whole
+        // search INLINE on this thread — notably `final_score` (game-end scoring)
+        // via PlayUtils::computeLead → runWholeSearch, layered on top of ~274KB of
+        // by-value Board/BoardHistory locals (BoardHistory is ~118KB at
+        // COMPILE_MAX_BOARD_LEN=37). 1MB is not enough for that path, so pin 8MB —
+        // the desktop main-thread default KataGo is developed against.
         let thread = Thread {
             KataGoGTP.runGTP(modelPath: modelPath,
                              humanModelPath: "",
@@ -54,7 +59,7 @@ final class InProcessKataGoEngine: KataGoEngineIO, @unchecked Sendable {
                              tunerFull: false,
                              reTune: false)
         }
-        thread.stackSize = 4096 * 256
+        thread.stackSize = 4096 * 2048  // 8MB
         thread.name = "KataGoEngine"
         thread.start()
     }

@@ -389,7 +389,7 @@ void NNEvaluator::spawnServerThreads() {
     int gpuIdxForThisThread = gpuIdxByServerThread[i];
     string randSeedThisThread = randSeed + ":NNEvalServerThread:" + Global::intToString(numServerThreadsEverSpawned);
     numServerThreadsEverSpawned++;
-    std::thread* thread = new std::thread(
+    LargeStackThread* thread = new LargeStackThread(
       &serveEvals,randSeedThisThread,this,loadedModel,gpuIdxForThisThread,i
     );
     serverThreads.push_back(thread);

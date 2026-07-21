@@ -6,6 +6,7 @@
 
 #include "../core/global.h"
 #include "../core/hash.h"
+#include "../core/largestackthread.h"
 #include "../core/logger.h"
 #include "../core/multithread.h"
 #include "../core/threadsafequeue.h"
@@ -168,7 +169,7 @@ struct Search {
 
   //Thread pool
   int numThreadsSpawned;
-  std::thread* threads;
+  LargeStackThread* threads;  // iOS 512KB default stack overflows in search; see largestackthread.h
   ThreadSafeQueue<std::function<void(int)>*>* threadTasks;
   ThreadSafeCounter* threadTasksRemaining;
 

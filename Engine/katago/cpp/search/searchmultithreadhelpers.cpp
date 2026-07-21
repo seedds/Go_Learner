@@ -47,9 +47,9 @@ void Search::spawnThreadsIfNeeded() {
   killThreads();
   threadTasks = new ThreadSafeQueue<std::function<void(int)>*>[desiredNumAdditionalThreads];
   threadTasksRemaining = new ThreadSafeCounter();
-  threads = new std::thread[desiredNumAdditionalThreads];
+  threads = new LargeStackThread[desiredNumAdditionalThreads];
   for(int i = 0; i<desiredNumAdditionalThreads; i++)
-    threads[i] = std::thread(threadTaskLoop,this,i+1);
+    threads[i] = LargeStackThread(threadTaskLoop,this,i+1);
   numThreadsSpawned = desiredNumAdditionalThreads;
 }
 

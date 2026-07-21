@@ -73,9 +73,13 @@ garbage ⇒ a feature-encoding or decode regression.
    buffers are process-global. Drive it only through `GameSession` over a single
    `KataGoEngineIO`. Never spin up a second reader (it deadlocks on the shared
    output). `GameState` suppresses engine launch under XCTest so the test owns it.
-2. **The engine GTP loop needs a 1 MB thread stack.** `ScoreValue::initTables()`
-   overflows the default 512 KB stack and SIGSEGVs. `InProcessKataGoEngine` sets
-   `thread.stackSize = 4096 * 256` — keep it.
+2. **The engine GTP loop needs an 8 MB thread stack.** `ScoreValue::initTables()`
+   overflows the default 512 KB stack, and some GTP commands (`final_score`) run a
+   whole search INLINE on this thread on top of ~274 KB of by-value `BoardHistory`
+   locals. `InProcessKataGoEngine` sets `thread.stackSize = 4096 * 2048` — keep it.
+   The engine's *internal* threads (search/analyze-callback/NN-server) are `std::thread`s
+   that default to iOS's 512 KB, so they're spawned via `LargeStackThread`
+   (`Engine/katago/cpp/core/largestackthread.h`) with a 4 MB stack — keep those too.
 3. **Simulator = CoreML/CPU; device = GPU+ANE mux.** MLX GPU inference crashes in
    the simulator's Metal translation layer, and the sim has no ANE, so CoreML is
    pinned to `.cpuOnly` there (`KataGoSwift/metalbackend.swift`,
