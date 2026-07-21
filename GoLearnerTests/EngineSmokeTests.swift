@@ -125,4 +125,45 @@ final class EngineSmokeTests: XCTestCase {
         await session.command(GtpCommandBuilder.boardSize(19))
         await session.command(GtpCommandBuilder.clearBoard)
     }
+
+    /// Setup-position gate (editor / photo import): a hand-made SGF with AB/AW
+    /// setup stones and `PL[W]` must load through `loadsgf` and leave the engine
+    /// with White to move — the path GameState.commitSetup uses for a puzzle.
+    /// This is the only GTP route that honors an explicit side to move
+    /// (set_position always forces Black), so it's the load-bearing contract for
+    /// White-to-play puzzles. We confirm White actually moves next by asking the
+    /// engine to genmove W and getting a real on-board reply.
+    func testLoadSGFSetupWithWhiteToPlay() async throws {
+        let session = await sharedSession()
+
+        // Two black stones + one white stone, White to play, on 19×19.
+        let sgf = "(;GM[1]FF[4]CA[UTF-8]SZ[19]RU[Chinese]KM[7]PL[W]AB[dd][dp]AW[pp])"
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("golearner-test-\(UUID().uuidString).sgf")
+        try sgf.write(to: url, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let load = await session.command(GtpCommandBuilder.loadSGF(path: url.path))
+        XCTAssertTrue(load.ok, "loadsgf should accept a valid setup SGF: \(load.text)")
+
+        // showboard should reflect the three setup stones.
+        let board = await session.command(GtpCommandBuilder.showboard)
+        XCTAssertTrue(board.ok)
+
+        // White to move: genmove W returns a real move (not an error).
+        guard let vertex = await session.genMove(color: "W") else {
+            XCTFail("genmove W returned nil after loadsgf PL[W]")
+            return
+        }
+        let up = vertex.uppercased()
+        XCTAssertNotEqual(up, "RESIGN", "engine resigned unexpectedly")
+        if up != "PASS" {
+            XCTAssertNotNil(GtpAnalysisParser.vertexToPosition(up, size: 19),
+                            "unparseable White move: \(vertex)")
+        }
+
+        // Restore the shared engine to a clean 19×19 for later tests.
+        await session.command(GtpCommandBuilder.boardSize(19))
+        await session.command(GtpCommandBuilder.clearBoard)
+    }
 }

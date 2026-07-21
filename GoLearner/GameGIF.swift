@@ -64,13 +64,13 @@ enum GameGIF {
     // MARK: - Frame extraction (stateless replay via GoReplay)
 
     /// Snapshot every position (base → final move) as GIF frames, by replaying
-    /// `moves` (after `handicap`) with KataGo's rules. Returns `moves.count + 1`
+    /// `moves` on top of `setup` with KataGo's rules. Returns `moves.count + 1`
     /// frames. Engine-free and thread-safe.
-    static func frames(size: Int, handicap: [SGFPoint], moves: [ReplayMove]) -> [Frame] {
+    static func frames(size: Int, setup: SetupPosition, moves: [ReplayMove]) -> [Frame] {
         var out: [Frame] = []
         out.reserveCapacity(moves.count + 1)
         for ply in 0...moves.count {
-            let pos = GoReplayKit.position(size: size, handicap: handicap, moves: moves, plyLimit: ply)
+            let pos = GoReplayKit.position(size: size, setup: setup, moves: moves, plyLimit: ply)
             let last: (x: Int, y: Int)? = pos.lastMoveX >= 0 ? (Int(pos.lastMoveX), Int(pos.lastMoveY)) : nil
             out.append(Frame(cells: [UInt8](pos.cells), lastMove: last))
         }

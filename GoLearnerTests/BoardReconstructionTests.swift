@@ -57,6 +57,32 @@ final class BoardReconstructionTests: XCTestCase {
         XCTAssertEqual(at(stones, 9, 9, size: 19), .white)
     }
 
+    func testPlacesTwoColorSetupStones() {
+        // An edited/photo-imported position: both colors pre-placed via AB/AW,
+        // White to play. All setup stones must land on the board unchanged.
+        let game = SGFGame(boardSize: 19, komi: 7, moves: [],
+                           setupBlack: [SGFPoint(x: 3, y: 3), SGFPoint(x: 4, y: 3)],
+                           setupWhite: [SGFPoint(x: 15, y: 15)],
+                           playerToMove: .white)
+        let stones = BoardReconstruction.stones(from: game)
+        XCTAssertEqual(at(stones, 3, 3, size: 19), .black)
+        XCTAssertEqual(at(stones, 4, 3, size: 19), .black)
+        XCTAssertEqual(at(stones, 15, 15, size: 19), .white)
+    }
+
+    func testTwoColorSetupThenWhiteMoveCaptures() {
+        // White to play from a setup where a black stone is in atari; White's
+        // first move captures it — exercising real rules over a mixed base.
+        let game = SGFGame(boardSize: 19, komi: 7, moves: [.play(.white, 0, 1)],
+                           setupBlack: [SGFPoint(x: 0, y: 0)],
+                           setupWhite: [SGFPoint(x: 1, y: 0)],
+                           playerToMove: .white)
+        let stones = BoardReconstruction.stones(from: game)
+        XCTAssertEqual(at(stones, 0, 0, size: 19), .empty, "surrounded black stone captured by White")
+        XCTAssertEqual(at(stones, 1, 0, size: 19), .white)
+        XCTAssertEqual(at(stones, 0, 1, size: 19), .white)
+    }
+
     func testHandicapSetupResolvesCaptures() {
         // A black handicap stone in the corner is captured after White surrounds
         // it, exercising real rules over the setup base.

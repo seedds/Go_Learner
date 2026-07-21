@@ -83,6 +83,33 @@ while reviewing. GIF frames and library thumbnails use the same replay path.
 `ScoreValue::initTables()` (replay needs only rules, and double-init would trip
 the engine's single-init assertion).
 
+Every replay (and the live game) sits on a **setup base** — a `SetupPosition`
+(`GoLearner/SetupPosition.swift`): pre-placed Black *and* White stones plus the
+side to move. An even game is the empty base; a handicap is black stones with
+White to move; an edited/photo-imported puzzle is an arbitrary base. The
+side-to-move shown at any ply is `setup.toMove` flipped once per applied move —
+**not** `!handicap.isEmpty` — so White-to-play positions render and play
+correctly. The base persists through SGF `AB`/`AW`/`PL`.
+
+## 3.1 Setup positions: editor & photo import
+
+The free board editor (`EditorBoard` pure model + `BoardEditorView`) and photo
+import both produce a `SetupPosition`, committed via `GameState.commitSetup`.
+Because arbitrary two-color positions with an explicit turn can't go through
+`set_position` (it forces Black to move), `syncEngineToRecord` writes a temp SGF
+and drives **`loadsgf`** for any non-empty base, then re-applies app komi/rules
+(which preserve the loaded position). A base is validated with
+`GoReplayKit.isPlaceableSetup` (the engine's own `setStonesFailIfNoLibs`) before
+commit, so a zero-liberty group can't desync the engine from the UI.
+
+Photo/camera import (`GoLearner/Recognition/**`) is a heuristic pipeline:
+`VNDetectRectangles` finds the board quad → `CIPerspectiveCorrection` rectifies
+it → `BoardImageAnalysis` (pure, tested) classifies each intersection's luma
+against the board background. The `BoardRecognizer` protocol seams this so the
+reference's OpenCV C++ recognizer can replace `VisionBoardRecognizer` later. A
+recognized board opens in the editor for tap-to-correct, sharing the commit path
+with hand-built puzzles.
+
 ---
 
 ## 4. Gotchas discovered (don't relearn these)
@@ -137,6 +164,8 @@ user has moved on.
 | Human-SL profiles | Bundle the human net, restore `humanSL*` cfg, add profile → visit-budget in `GtpCommandBuilder`. ROADMAP R5 |
 | GTP console | A view over `GameSession` raw command/line I/O. ROADMAP R4 |
 | Sub-19 board sizes | `GameState.boardSize`, `rectangular_boardsize`, star points in `BoardView`. ROADMAP A4b |
+| Setup positions / puzzles | `SetupPosition`, `GameState.commitSetup`, `EditorBoard`/`BoardEditorView`; `loadsgf` sync |
+| Better photo recognition | Implement `BoardRecognizer` (e.g. port OpenCV `GobanRecogKit`); swap for `VisionBoardRecognizer` |
 | Learning features | New views reading `NNResult` / `GtpAnalysis` |
 
 ---

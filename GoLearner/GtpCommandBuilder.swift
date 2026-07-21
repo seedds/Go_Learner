@@ -42,6 +42,11 @@ enum GtpCommandBuilder {
     /// Fixed handicap placement (engine chooses the standard points).
     static func fixedHandicap(_ count: Int) -> String { "fixed_handicap \(count)" }
 
+    /// Load a game from an SGF file at `path`, reconstructing setup stones
+    /// (`AB`/`AW`), the side to move (`PL`), and the move list. The engine
+    /// tokenizes the command on spaces, so `path` must be space-free.
+    static func loadSGF(path: String) -> String { "loadsgf \(path)" }
+
     static let showboard = "showboard"
 
     /// KataGo rule setters. `ko` ∈ {SIMPLE,POSITIONAL,SITUATIONAL},

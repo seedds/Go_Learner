@@ -113,6 +113,49 @@ final class SGFTests: XCTestCase {
         XCTAssertFalse(sgf.contains("AB["))
     }
 
+    // MARK: Setup positions (edited / photo-imported)
+
+    func testSerializeSetupWhiteAndPlayerToMove() {
+        // A White-to-play puzzle: black + white setup stones, explicit PL, no HA.
+        let game = SGFGame(boardSize: 19, komi: 7, moves: [],
+                           setupBlack: [SGFPoint(x: 3, y: 3)],
+                           setupWhite: [SGFPoint(x: 15, y: 15), SGFPoint(x: 2, y: 2)],
+                           playerToMove: .white)
+        let sgf = SGF.serialize(game)
+        XCTAssertTrue(sgf.contains("AB[dd]"))
+        XCTAssertTrue(sgf.contains("AW[pp][cc]"))
+        XCTAssertTrue(sgf.contains("PL[W]"))
+        XCTAssertFalse(sgf.contains("HA["), "an edited position is not a handicap")
+    }
+
+    func testParseSetupWhiteAndPlayerToMove() throws {
+        let text = "(;GM[1]SZ[19]KM[7]AB[dd]AW[pp][cc]PL[W])"
+        let game = try SGF.parse(text)
+        XCTAssertEqual(game.setupBlack, [SGFPoint(x: 3, y: 3)])
+        XCTAssertEqual(game.setupWhite, [SGFPoint(x: 15, y: 15), SGFPoint(x: 2, y: 2)])
+        XCTAssertEqual(game.playerToMove, .white)
+    }
+
+    func testRoundTripPreservesSetupAndPlayerToMove() throws {
+        let original = SGFGame(boardSize: 13, komi: 7,
+                               moves: [.play(.white, 6, 6)],
+                               setupBlack: [SGFPoint(x: 2, y: 2), SGFPoint(x: 10, y: 3)],
+                               setupWhite: [SGFPoint(x: 3, y: 10)],
+                               playerToMove: .white)
+        let decoded = try SGF.parse(SGF.serialize(original))
+        XCTAssertEqual(decoded.setupBlack, original.setupBlack)
+        XCTAssertEqual(decoded.setupWhite, original.setupWhite)
+        XCTAssertEqual(decoded.playerToMove, .white)
+        XCTAssertEqual(decoded.moves, original.moves)
+    }
+
+    func testMissingPlayerToMoveParsesNil() throws {
+        // A plain even game has no PL tag; the caller derives the side to move.
+        let game = try SGF.parse("(;SZ[19];B[dd])")
+        XCTAssertNil(game.playerToMove)
+        XCTAssertTrue(game.setupWhite.isEmpty)
+    }
+
     func testRoundTripPreservesSubNineteenHandicap() throws {
         // A 9×9 handicap game must persist its sub-19 setup stones so reloads
         // keep the engine + display in sync (see HandicapPoints).

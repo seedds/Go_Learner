@@ -55,7 +55,7 @@ struct RootView: View {
         NewGameConfig(size: game.boardSize, komi: game.komi, koRule: game.koRule,
                       scoringRule: game.scoringRule,
                       blackPlayer: game.blackPlayer, whitePlayer: game.whitePlayer,
-                      handicap: game.handicapStones.count)
+                      handicap: game.setup.handicapCount)
     }
 
     /// On first launch pick the most recent game, or create one so there's a

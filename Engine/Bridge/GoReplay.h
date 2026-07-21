@@ -30,14 +30,39 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// Pure functions that replay a move list into board positions. No engine, no
 /// neural net — just the rules. Thread-safe (each call builds its own Board).
+///
+/// Every call starts from a *setup base*: pre-placed Black stones
+/// (`setupBlack*`) and White stones (`setupWhite*`), with `initialPlayer` the
+/// side to move from the base (GoColorBlack/GoColorWhite). A fixed handicap is
+/// just black setup stones + White to move; an empty even game passes zero
+/// setup stones + Black to move.
 @interface GoReplay : NSObject
 
+/// True if the setup base (Black + White stones) is physically placeable under
+/// the engine's own rule (`Board::setStonesFailIfNoLibs`): no overlaps and no
+/// zero-liberty group. This is exactly what the engine's `loadsgf`/`set_position`
+/// require, so validating here keeps the editor's committed position in sync
+/// with what the engine will accept (a rejected `loadsgf` would otherwise leave
+/// the engine on the old position while the UI shows the new one).
++ (BOOL)isPlaceableSetupWithBoardSize:(int)size
+                         setupBlackXs:(const int *_Nullable)sbxs
+                         setupBlackYs:(const int *_Nullable)sbys
+                      setupBlackCount:(int)setupBlackCount
+                         setupWhiteXs:(const int *_Nullable)swxs
+                         setupWhiteYs:(const int *_Nullable)swys
+                      setupWhiteCount:(int)setupWhiteCount
+    NS_SWIFT_NAME(isPlaceableSetup(boardSize:setupBlackXs:setupBlackYs:setupBlackCount:setupWhiteXs:setupWhiteYs:setupWhiteCount:));
+
 /// True if playing `color` at (candX, candY) — or a pass when candX < 0 — is
-/// legal after replaying `handicap` + the given moves. Same rules as the engine.
+/// legal after applying the setup base + the given moves. Same rules as engine.
 + (BOOL)isLegalWithBoardSize:(int)size
-                  handicapXs:(const int *_Nullable)hxs
-                  handicapYs:(const int *_Nullable)hys
-               handicapCount:(int)handicapCount
+                setupBlackXs:(const int *_Nullable)sbxs
+                setupBlackYs:(const int *_Nullable)sbys
+             setupBlackCount:(int)setupBlackCount
+                setupWhiteXs:(const int *_Nullable)swxs
+                setupWhiteYs:(const int *_Nullable)swys
+             setupWhiteCount:(int)setupWhiteCount
+               initialPlayer:(int)initialPlayer
                       moveXs:(const int *_Nullable)mxs
                       moveYs:(const int *_Nullable)mys
                   moveColors:(const int *_Nullable)mcolors
@@ -45,24 +70,28 @@ NS_ASSUME_NONNULL_BEGIN
                    candidateX:(int)candX
                    candidateY:(int)candY
                candidateColor:(int)candColor
-    NS_SWIFT_NAME(isLegal(boardSize:handicapXs:handicapYs:handicapCount:moveXs:moveYs:moveColors:moveCount:candidateX:candidateY:candidateColor:));
+    NS_SWIFT_NAME(isLegal(boardSize:setupBlackXs:setupBlackYs:setupBlackCount:setupWhiteXs:setupWhiteYs:setupWhiteCount:initialPlayer:moveXs:moveYs:moveColors:moveCount:candidateX:candidateY:candidateColor:));
 
-/// Replay `count` handicap stones + the given moves onto a fresh `size` board.
-/// Handicap points are placed as Black (White then moves first); pass moves are
-/// encoded with x<0. Moves are 0-indexed (x,y) with y from the top. `colors`
-/// gives each move's color (GoColorBlack/GoColorWhite), matching `xs`/`ys`.
-/// Illegal moves are skipped (best-effort, matching the SGF import path).
-/// `plyLimit` < 0 replays all moves; otherwise only the first `plyLimit`.
+/// Replay the setup base + the given moves onto a fresh `size` board. Setup
+/// stones are placed directly (Black then White); pass moves are encoded with
+/// x<0. Moves are 0-indexed (x,y) with y from the top. `colors` gives each
+/// move's color (GoColorBlack/GoColorWhite), matching `xs`/`ys`. Illegal moves
+/// are skipped (best-effort, matching the SGF import path). `plyLimit` < 0
+/// replays all moves; otherwise only the first `plyLimit`.
 + (GoPosition *)positionWithBoardSize:(int)size
-                        handicapXs:(const int *_Nullable)hxs
-                        handicapYs:(const int *_Nullable)hys
-                     handicapCount:(int)handicapCount
+                        setupBlackXs:(const int *_Nullable)sbxs
+                        setupBlackYs:(const int *_Nullable)sbys
+                     setupBlackCount:(int)setupBlackCount
+                        setupWhiteXs:(const int *_Nullable)swxs
+                        setupWhiteYs:(const int *_Nullable)swys
+                     setupWhiteCount:(int)setupWhiteCount
+                       initialPlayer:(int)initialPlayer
                             moveXs:(const int *_Nullable)mxs
                             moveYs:(const int *_Nullable)mys
                         moveColors:(const int *_Nullable)mcolors
                          moveCount:(int)moveCount
                           plyLimit:(int)plyLimit
-    NS_SWIFT_NAME(position(boardSize:handicapXs:handicapYs:handicapCount:moveXs:moveYs:moveColors:moveCount:plyLimit:));
+    NS_SWIFT_NAME(position(boardSize:setupBlackXs:setupBlackYs:setupBlackCount:setupWhiteXs:setupWhiteYs:setupWhiteCount:initialPlayer:moveXs:moveYs:moveColors:moveCount:plyLimit:));
 
 @end
 

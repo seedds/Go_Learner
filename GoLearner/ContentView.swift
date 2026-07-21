@@ -15,11 +15,22 @@ private struct GIFExportRequest: Identifiable {
     let frames: [GameGIF.Frame]
 }
 
+/// Wraps an editor seed board so it can drive a `.sheet(item:)`.
+private struct EditRequest: Identifiable {
+    let id = UUID()
+    let board: EditorBoard
+}
+
 struct ContentView: View {
     @Environment(GameState.self) private var game
     @Binding var showNewGame: Bool
     @State private var importingSGF = false
     @State private var gifExport: GIFExportRequest?
+    @State private var editRequest: EditRequest?
+    @State private var showPhotoImport = false
+    /// The recognizer feeding photo import: Vision + Core Image heuristic (no
+    /// model asset). Any misreads are corrected in the editor before committing.
+    private let recognizer: BoardRecognizer = VisionBoardRecognizer()
 
     /// SGF is plain text; also accept a `.sgf`-extension type where available.
     private var sgfTypes: [UTType] {
@@ -46,6 +57,23 @@ struct ContentView: View {
         .sheet(item: $gifExport) { request in
             GIFExportView(frames: request.frames, boardSize: game.boardSize)
         }
+        .sheet(item: $editRequest) { request in
+            BoardEditorView(board: request.board,
+                            isPlaceable: { game.canCommitSetup($0) },
+                            onCommit: { game.commitSetup($0, size: request.board.size) })
+        }
+        .sheet(isPresented: $showPhotoImport) {
+            PhotoImportView(recognizer: recognizer, boardSize: game.boardSize) { board in
+                // Recognized position → open the editor to correct + commit.
+                editRequest = EditRequest(board: board)
+            }
+        }
+    }
+
+    /// Seed the editor from the position currently on screen.
+    private func startEditing() {
+        let board = EditorBoard(cells: game.stones, size: game.boardSize, toMove: game.sideToMove)
+        editRequest = EditRequest(board: board)
     }
 
     private var header: some View {
@@ -69,6 +97,16 @@ struct ContentView: View {
                     gifExport = GIFExportRequest(frames: game.gifFrames())
                 } label: {
                     Label("Export GIF", systemImage: "film")
+                }
+                Button {
+                    startEditing()
+                } label: {
+                    Label("Edit Position", systemImage: "square.and.pencil")
+                }
+                Button {
+                    showPhotoImport = true
+                } label: {
+                    Label("Import from Photo", systemImage: "camera.viewfinder")
                 }
             } label: {
                 Text("GoLearner").font(.headline).foregroundStyle(.white)

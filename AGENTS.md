@@ -112,6 +112,18 @@ garbage ⇒ a feature-encoding or decode regression.
   to side-to-move in `GameState.nnResult(from:)`.
 - **default_gtp.cfg has `humanSL*` stripped:** no human-SL net is bundled, and
   the engine throws in `Setup::loadParams` if those keys are present without it.
+- **Arbitrary setup positions load via `loadsgf`, not `set_position`.** The
+  editor + photo import build a `SetupPosition` (both-color stones + side-to-move)
+  and `GameState.syncEngineToRecord` writes a temp SGF and sends `loadsgf`.
+  `set_position` can place both colors but *always forces Black to move*
+  (`gtp.cpp` ~618), so it can't express White-to-play puzzles; `loadsgf` honors
+  `AB`/`AW`/`PL`. `loadsgf` **aborts uncatchably without an `RU[...]` tag**, so
+  the SGF codec always writes `RU[Chinese]`. `komi`/`kata-set-rule` after
+  `loadsgf` preserve the loaded position, so app rules are re-applied on top. The
+  temp path must be space-free (GTP splits the command on spaces). Validate a
+  setup with `GoReplayKit.isPlaceableSetup` first (the engine rejects a
+  zero-liberty group), else the engine keeps the old position while the UI shows
+  the new one.
 - **Tests are host-based** now (`@testable import GoLearner`, hosted by the app),
   so the engine's CoreML inference runs in a real app process (a hostless bundle
   crashes the NN-server threads).
@@ -132,6 +144,9 @@ garbage ⇒ a feature-encoding or decode regression.
 | Vendored KataGo engine (C++) | `Engine/katago/cpp/**` (pin in `Engine/katago/UPSTREAM.txt`) |
 | Board UI + input | `GoLearner/BoardView.swift` |
 | Analysis overlay | `GoLearner/AnalysisOverlay.swift` |
+| Setup base (both-color stones + side-to-move) | `GoLearner/SetupPosition.swift` |
+| Free board editor (puzzles) | `GoLearner/EditorBoard.swift` (pure), `GoLearner/BoardEditorView.swift` |
+| Photo/camera position import | `GoLearner/Recognition/**` (`RecognizedBoard`, `BoardRecognizer`, `VisionBoardRecognizer`, `BoardImageAnalysis`, `PhotoImportView`, `CameraCaptureView`) |
 | Project definition | `project.yml` (→ `xcodegen`) |
 | Tests | `GoLearnerTests/` (host-based) |
 

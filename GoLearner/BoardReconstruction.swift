@@ -15,7 +15,7 @@ enum BoardReconstruction {
     /// SGF are skipped (best-effort, matching the import path).
     static func stones(from game: SGFGame) -> [GoColor] {
         GoReplayKit.stones(size: game.boardSize,
-                           handicap: game.setupBlack,
+                           setup: SetupPosition(sgf: game),
                            moves: GoReplayKit.replayMoves(from: game.moves))
     }
 }

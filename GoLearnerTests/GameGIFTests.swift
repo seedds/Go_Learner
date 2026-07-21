@@ -35,7 +35,7 @@ final class GameGIFTests: XCTestCase {
 
     func testFrameCountAndEndpoints() {
         let moves: [ReplayMove] = [.play(.black, 3, 3), .play(.white, 15, 15)]
-        let frames = GameGIF.frames(size: 19, handicap: [], moves: moves)
+        let frames = GameGIF.frames(size: 19, setup: .empty, moves: moves)
         XCTAssertEqual(frames.count, 3, "empty board + 2 moves")
 
         // Frame 0 = empty board.
@@ -56,7 +56,7 @@ final class GameGIFTests: XCTestCase {
     func testFramesResolveCaptures() {
         // White corner captured by Black on the last move.
         let moves: [ReplayMove] = [.play(.black, 1, 0), .play(.white, 0, 0), .play(.black, 0, 1)]
-        let frames = GameGIF.frames(size: 19, handicap: [], moves: moves)
+        let frames = GameGIF.frames(size: 19, setup: .empty, moves: moves)
         XCTAssertEqual(frames.count, 4)
         // Before the capture the white stone is present…
         XCTAssertEqual(cell(frames[2], 0, 0, size: 19), 2)
@@ -65,7 +65,7 @@ final class GameGIFTests: XCTestCase {
     }
 
     func testEmptyGameIsSingleFrame() {
-        let frames = GameGIF.frames(size: 9, handicap: [], moves: [])
+        let frames = GameGIF.frames(size: 9, setup: .empty, moves: [])
         XCTAssertEqual(frames.count, 1)
         XCTAssertEqual(frames[0].cells.count, 9 * 9)
     }
@@ -74,7 +74,7 @@ final class GameGIFTests: XCTestCase {
 
     func testEncodeWritesAllFramesPlusMetadata() throws {
         let moves: [ReplayMove] = [.play(.black, 3, 3), .play(.white, 15, 15)]
-        let frames = GameGIF.frames(size: 19, handicap: [], moves: moves)
+        let frames = GameGIF.frames(size: 19, setup: .empty, moves: moves)
 
         let url = tempURL()
         defer { try? FileManager.default.removeItem(at: url) }
@@ -100,7 +100,7 @@ final class GameGIFTests: XCTestCase {
     }
 
     func testEncodeNonLoopingSetsLoopCountOne() throws {
-        let frames = GameGIF.frames(size: 9, handicap: [], moves: [.play(.black, 4, 4)])
+        let frames = GameGIF.frames(size: 9, setup: .empty, moves: [.play(.black, 4, 4)])
 
         let url = tempURL()
         defer { try? FileManager.default.removeItem(at: url) }

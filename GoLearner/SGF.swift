@@ -8,9 +8,9 @@
 //  into the hostless test bundle alongside the bridge.
 //
 //  Scope: single game tree, main line only (variations are ignored on import),
-//  moves + board size + komi + a few name/result tags. This matches what the
-//  app produces and covers the common real-world files. Setup stones (AB/AW)
-//  and full property fidelity are out of scope for now.
+//  moves + board size + komi + a few name/result tags, plus setup stones
+//  (AB/AW) and the player-to-move (PL) so hand-edited and photo-imported
+//  positions round-trip. Full property fidelity is otherwise out of scope.
 //
 
 import Foundation
@@ -42,18 +42,27 @@ struct SGFGame: Equatable {
     /// Black setup stones (SGF `AB`), placed before any move. For a fixed
     /// handicap game these are the handicap stones; White then moves first.
     var setupBlack: [SGFPoint]
+    /// White setup stones (SGF `AW`), placed before any move. Non-empty only for
+    /// edited/photo-imported positions (a handicap game has white == []).
+    var setupWhite: [SGFPoint]
+    /// Player to move from the setup base (SGF `PL`), or nil if the file omits
+    /// it. When nil the caller derives it (Black for even, White after handicap).
+    var playerToMove: GoColor?
     var blackName: String?
     var whiteName: String?
     var result: String?
 
     init(boardSize: Int, komi: Float, moves: [SGFMove],
-         handicap: Int = 0, setupBlack: [SGFPoint] = [],
+         handicap: Int = 0, setupBlack: [SGFPoint] = [], setupWhite: [SGFPoint] = [],
+         playerToMove: GoColor? = nil,
          blackName: String? = nil, whiteName: String? = nil, result: String? = nil) {
         self.boardSize = boardSize
         self.komi = komi
         self.moves = moves
         self.handicap = handicap
         self.setupBlack = setupBlack
+        self.setupWhite = setupWhite
+        self.playerToMove = playerToMove
         self.blackName = blackName
         self.whiteName = whiteName
         self.result = result
@@ -80,6 +89,11 @@ enum SGF {
             s += "AB"
             for p in game.setupBlack { s += "[\(encodePoint(p, size: game.boardSize))]" }
         }
+        if !game.setupWhite.isEmpty {
+            s += "AW"
+            for p in game.setupWhite { s += "[\(encodePoint(p, size: game.boardSize))]" }
+        }
+        if let pl = game.playerToMove { s += "PL[\(pl == .white ? "W" : "B")]" }
         if let pb = game.blackName { s += "PB[\(escape(pb))]" }
         if let pw = game.whiteName { s += "PW[\(escape(pw))]" }
         if let re = game.result { s += "RE[\(escape(re))]" }
@@ -123,6 +137,8 @@ enum SGF {
         var moves: [SGFMove] = []
         var handicap = 0
         var setupBlack: [SGFPoint] = []
+        var setupWhite: [SGFPoint] = []
+        var playerToMove: GoColor?
         var blackName: String?
         var whiteName: String?
         var result: String?
@@ -141,6 +157,14 @@ enum SGF {
             case "AB":
                 // Black setup stones: one point per bracketed value.
                 setupBlack += values.compactMap { decodePoint($0, size: boardSize) }
+            case "AW":
+                // White setup stones: one point per bracketed value.
+                setupWhite += values.compactMap { decodePoint($0, size: boardSize) }
+            case "PL":
+                // Player to move: "B"/"W" (first letter, case-insensitive).
+                if let c = v.trimmingCharacters(in: .whitespaces).uppercased().first {
+                    playerToMove = c == "W" ? .white : .black
+                }
             case "PB": blackName = unescape(v)
             case "PW": whiteName = unescape(v)
             case "RE": result = unescape(v)
@@ -150,7 +174,8 @@ enum SGF {
             }
         }
         return SGFGame(boardSize: boardSize, komi: komi, moves: moves,
-                       handicap: handicap, setupBlack: setupBlack,
+                       handicap: handicap, setupBlack: setupBlack, setupWhite: setupWhite,
+                       playerToMove: playerToMove,
                        blackName: blackName, whiteName: whiteName, result: result)
     }
 

@@ -134,8 +134,25 @@ Implemented on the current architecture (no P0 dependency).
   seam (`list_commands`, `genmove`, `kata-analyze`, …). *(low after P0)*
 - ✅ **R7. GIF export** — animated GIF via `ImageIO` (speed, size, coords, loop,
   final hold), share sheet. *(P0-independent; `GameGIF`, `GIFExportView`)*
-- **R6. Photo import** — Vision board/stone recognition, tap-to-correct,
-  next-player picker (reference `GobanRecogKit`). Engine-independent. *(high)*
+- 🔸 **R6. Photo/camera import** — landed with a **Vision + Core Image heuristic**
+  recognizer (no OpenCV/model): `VNDetectRectangles` → `CIPerspectiveCorrection`
+  → per-intersection luma classification (`BoardImageAnalysis`). Board size is a
+  user picker (inferring 9/13/19 is unreliable), and every read lands in the
+  **board editor** for tap-to-correct before commit. Photos (`PhotosPicker`) +
+  in-app camera (`AVCaptureSession`, `NSCameraUsageDescription`). The reference's
+  OpenCV `GobanRecogKit` C++ port is deferred; the `BoardRecognizer` protocol lets
+  it drop in later without UI changes. *(remaining: OpenCV port for accuracy)*
+- ✅ **Free board editor** — hand-place any position (Black/White/Erase +
+  side-to-move) and play/analyze it as a puzzle. Built on the setup-position
+  foundation below; engine-free while editing, commits via `loadsgf`.
+
+### Setup-position foundation (shared by editor + photo import)
+Generalized the black-only fixed handicap into a first-class `SetupPosition`
+(both-color stones + explicit side-to-move), threaded through `GoReplay`,
+`GameState` (side-to-move now derives from the setup, not `!handicap.isEmpty`),
+the SGF codec (`AB`/`AW`/`PL` round-trip, so edited/recognized boards persist),
+and engine sync (`loadsgf` for any setup base; `set_position` can't express
+White-to-play). Handicap is now the `black-only, White-to-move` special case.
 
 ---
 

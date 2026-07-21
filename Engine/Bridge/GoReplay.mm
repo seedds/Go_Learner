@@ -64,22 +64,39 @@ void ensureHashInit() {
 
 @end
 
-// Replay handicap + the first `moveCount` moves into `board`/`history`, leaving
+// Place the setup base (Black stones, then White stones) and set the side to
+// move. Shared by position building and legality checks so both agree on the
+// base. `initialPlayer` is GoColorBlack/GoColorWhite (defaulting to Black when
+// unset/empty). Returns the initial player actually used.
+static Player applySetup(Board &board, BoardHistory &history, int size, Rules rules,
+                         const int *sbxs, const int *sbys, int setupBlackCount,
+                         const int *swxs, const int *swys, int setupWhiteCount,
+                         int initialPlayer) {
+    if (sbxs && sbys) {
+        for (int i = 0; i < setupBlackCount; i++)
+            board.setStone(Location::getLoc(sbxs[i], sbys[i], size), C_BLACK);
+    }
+    if (swxs && swys) {
+        for (int i = 0; i < setupWhiteCount; i++)
+            board.setStone(Location::getLoc(swxs[i], swys[i], size), C_WHITE);
+    }
+    Player initialPla = (initialPlayer == GoColorWhite) ? P_WHITE : P_BLACK;
+    history.clear(board, initialPla, rules, 0);
+    return initialPla;
+}
+
+// Apply the setup base + the first `limit` moves into `board`/`history`, leaving
 // `pla` as the side to move. Shared by position building and legality checks.
 static Player replayInto(Board &board, BoardHistory &history, int size,
-                         const int *hxs, const int *hys, int handicapCount,
+                         const int *sbxs, const int *sbys, int setupBlackCount,
+                         const int *swxs, const int *swys, int setupWhiteCount,
+                         int initialPlayer,
                          const int *mxs, const int *mys, const int *mcolors,
                          int moveCount, int limit) {
     Rules rules = Rules::getTrompTaylorish();
-    Player initialPla = P_BLACK;
-    if (handicapCount > 0 && hxs && hys) {
-        for (int i = 0; i < handicapCount; i++) {
-            board.setStone(Location::getLoc(hxs[i], hys[i], size), C_BLACK);
-        }
-        initialPla = P_WHITE;
-    }
-    history.clear(board, initialPla, rules, 0);
-    Player pla = initialPla;
+    Player pla = applySetup(board, history, size, rules,
+                            sbxs, sbys, setupBlackCount, swxs, swys, setupWhiteCount,
+                            initialPlayer);
     int n = (limit < 0 || limit > moveCount) ? moveCount : limit;
     for (int i = 0; i < n; i++) {
         Player movePla = mcolors ? ((mcolors[i] == GoColorWhite) ? P_WHITE : P_BLACK) : pla;
@@ -97,10 +114,35 @@ static Player replayInto(Board &board, BoardHistory &history, int size,
 
 @implementation GoReplay
 
++ (BOOL)isPlaceableSetupWithBoardSize:(int)size
+                         setupBlackXs:(const int *)sbxs
+                         setupBlackYs:(const int *)sbys
+                      setupBlackCount:(int)setupBlackCount
+                         setupWhiteXs:(const int *)swxs
+                         setupWhiteYs:(const int *)swys
+                      setupWhiteCount:(int)setupWhiteCount {
+    ensureHashInit();
+    Board board(size, size);
+    std::vector<Move> placements;
+    if (sbxs && sbys)
+        for (int i = 0; i < setupBlackCount; i++)
+            placements.emplace_back(Location::getLoc(sbxs[i], sbys[i], size), P_BLACK);
+    if (swxs && swys)
+        for (int i = 0; i < setupWhiteCount; i++)
+            placements.emplace_back(Location::getLoc(swxs[i], swys[i], size), P_WHITE);
+    // Same check the engine's set_position / loadsgf use: overlaps or zero-liberty
+    // groups fail. On a fresh board an empty placement list is trivially valid.
+    return board.setStonesFailIfNoLibs(placements) ? YES : NO;
+}
+
 + (BOOL)isLegalWithBoardSize:(int)size
-                  handicapXs:(const int *)hxs
-                  handicapYs:(const int *)hys
-               handicapCount:(int)handicapCount
+                setupBlackXs:(const int *)sbxs
+                setupBlackYs:(const int *)sbys
+             setupBlackCount:(int)setupBlackCount
+                setupWhiteXs:(const int *)swxs
+                setupWhiteYs:(const int *)swys
+             setupWhiteCount:(int)setupWhiteCount
+               initialPlayer:(int)initialPlayer
                       moveXs:(const int *)mxs
                       moveYs:(const int *)mys
                   moveColors:(const int *)mcolors
@@ -111,7 +153,8 @@ static Player replayInto(Board &board, BoardHistory &history, int size,
     ensureHashInit();
     Board board(size, size);
     BoardHistory history;
-    replayInto(board, history, size, hxs, hys, handicapCount, mxs, mys, mcolors, moveCount, -1);
+    replayInto(board, history, size, sbxs, sbys, setupBlackCount, swxs, swys, setupWhiteCount,
+               initialPlayer, mxs, mys, mcolors, moveCount, -1);
     Player pla = (candColor == GoColorWhite) ? P_WHITE : P_BLACK;
     if (candX < 0) return YES;   // pass is always legal
     Loc loc = Location::getLoc(candX, candY, size);
@@ -119,9 +162,13 @@ static Player replayInto(Board &board, BoardHistory &history, int size,
 }
 
 + (GoPosition *)positionWithBoardSize:(int)size
-                        handicapXs:(const int *)hxs
-                        handicapYs:(const int *)hys
-                     handicapCount:(int)handicapCount
+                        setupBlackXs:(const int *)sbxs
+                        setupBlackYs:(const int *)sbys
+                     setupBlackCount:(int)setupBlackCount
+                        setupWhiteXs:(const int *)swxs
+                        setupWhiteYs:(const int *)swys
+                     setupWhiteCount:(int)setupWhiteCount
+                       initialPlayer:(int)initialPlayer
                             moveXs:(const int *)mxs
                             moveYs:(const int *)mys
                         moveColors:(const int *)mcolors
@@ -131,20 +178,11 @@ static Player replayInto(Board &board, BoardHistory &history, int size,
 
     Rules rules = Rules::getTrompTaylorish();
     Board board(size, size);
-    Player initialPla = P_BLACK;
-
-    // Handicap: place black stones directly, White moves first.
-    if (handicapCount > 0 && hxs && hys) {
-        for (int i = 0; i < handicapCount; i++) {
-            Loc loc = Location::getLoc(hxs[i], hys[i], size);
-            board.setStone(loc, C_BLACK);
-        }
-        initialPla = P_WHITE;
-    }
-
     BoardHistory history;
-    history.clear(board, initialPla, rules, 0);
-    Player pla = initialPla;
+    // Setup base: place Black then White stones, set the side to move.
+    Player pla = applySetup(board, history, size, rules,
+                            sbxs, sbys, setupBlackCount, swxs, swys, setupWhiteCount,
+                            initialPlayer);
 
     int lastX = -1, lastY = -1;
     int limit = (plyLimit < 0 || plyLimit > moveCount) ? moveCount : plyLimit;

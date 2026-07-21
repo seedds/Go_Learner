@@ -101,9 +101,11 @@ final class GameState {
     private(set) var komi: Float
     private(set) var koRule: KoRule = .positional
     private(set) var scoringRule: ScoringRule = .area
-    /// Fixed handicap stones for the current game (empty for an even game). These
-    /// form the replay base: navigation never rewinds below them.
-    private(set) var handicapStones: [SGFPoint] = []
+    /// The setup base for the current game: pre-placed black + white stones and
+    /// the side to move from there. Empty/even for a normal game, black stones +
+    /// White-to-move for a handicap, arbitrary for an edited/imported puzzle.
+    /// This forms the replay base: navigation never rewinds below it.
+    private(set) var setup: SetupPosition = .empty
 
     // MARK: Board state (derived from the move-list record via GoReplay)
     /// Flat board colors, index = y*boardSize + x.
@@ -261,7 +263,7 @@ final class GameState {
     func newGame() {
         generation += 1
         analysisTask?.cancel()
-        handicapStones = []
+        setup = .empty
         moves = []
         analysis = nil
         refreshFromRecord()
@@ -281,13 +283,45 @@ final class GameState {
         self.scoringRule = scoringRule
         self.blackPlayer = blackPlayer
         self.whitePlayer = whitePlayer
-        handicapStones = HandicapPoints.fixed(count: handicap, boardSize: boardSize)
+        setup = SetupPosition.handicap(count: handicap, boardSize: boardSize)
         generation += 1
         analysisTask?.cancel()
         moves = []
         analysis = nil
         refreshFromRecord()
         statusMessage = modelReady ? "New game" : statusMessage
+        Task { await resetEngineAndAdvance() }
+    }
+
+    /// Whether `setup` can be committed as a starting position: its stones must
+    /// be physically placeable under the engine's rule (no overlaps / zero-liberty
+    /// groups), so the engine's `loadsgf` will accept it and the display stays in
+    /// sync. An empty setup is always fine.
+    func canCommitSetup(_ setup: SetupPosition) -> Bool {
+        GoReplayKit.isPlaceableSetup(size: boardSize, setup: setup)
+    }
+
+    /// Replace the live game with a hand-edited / recognized starting position:
+    /// `setup`'s pre-placed stones become the new base with the given side to
+    /// move, and the move record is cleared. The engine is rebuilt via `loadsgf`
+    /// (see syncEngineToRecord), then normal play/analysis resumes so the user
+    /// can solve the position. Board size + rules are kept from the current game;
+    /// pass a `size` to switch (e.g. a recognized 13×13). No-op if the setup
+    /// isn't placeable — callers should gate on `canCommitSetup` and surface a
+    /// message.
+    func commitSetup(_ setup: SetupPosition, size: Int? = nil) {
+        if let size { adoptBoardSize(size) }
+        guard canCommitSetup(setup) else {
+            statusMessage = "Invalid position (a stone has no liberties)"
+            return
+        }
+        self.setup = setup
+        generation += 1
+        analysisTask?.cancel()
+        moves = []
+        analysis = nil
+        refreshFromRecord()
+        statusMessage = modelReady ? "Position set" : statusMessage
         Task { await resetEngineAndAdvance() }
     }
 
@@ -309,7 +343,7 @@ final class GameState {
         let base = branching ? Array(moves.prefix(currentPly)) : moves
         // GoReplay is the rules authority for legality (same rules as the engine)
         // and works even before the engine finishes loading.
-        guard GoReplayKit.isLegal(size: boardSize, handicap: handicapStones,
+        guard GoReplayKit.isLegal(size: boardSize, setup: setup,
                                   moves: base, candidate: .play(color, x, y)) else {
             statusMessage = "Illegal move"
             return
@@ -381,8 +415,13 @@ final class GameState {
             sgfMoves.append(m.isPass ? .pass(m.color) : .play(m.color, m.x, m.y))
         }
         let game = SGFGame(boardSize: boardSize, komi: komi, moves: sgfMoves,
-                           handicap: handicapStones.isEmpty ? 0 : handicapStones.count,
-                           setupBlack: handicapStones,
+                           handicap: setup.handicapCount,
+                           setupBlack: setup.black,
+                           setupWhite: setup.white,
+                           // Emit PL only when the side to move isn't the derived
+                           // default, so normal/handicap games stay PL-free and
+                           // edited puzzles carry their explicit turn.
+                           playerToMove: setup.needsExplicitPlayerToMove ? setup.toMove : nil,
                            result: gameOver ? gameResultText : nil)
         return SGF.serialize(game)
     }
@@ -397,10 +436,10 @@ final class GameState {
         komi = parsed.komi
         if let koRule { self.koRule = koRule }
         if let scoringRule { self.scoringRule = scoringRule }
-        handicapStones = parsed.setupBlack
+        setup = SetupPosition(sgf: parsed)
         // Keep only moves that replay legally (best-effort import), so the record
         // never desyncs from the engine.
-        moves = GoReplayKit.legalMoves(size: boardSize, handicap: handicapStones,
+        moves = GoReplayKit.legalMoves(size: boardSize, setup: setup,
                                        candidates: GoReplayKit.replayMoves(from: parsed.moves))
         currentPly = moves.count   // open a loaded game at the latest move, not review mode
         generation += 1
@@ -417,7 +456,7 @@ final class GameState {
     /// Snapshot every position (base → final move) for GIF rendering, from the
     /// live record independent of the reviewed ply.
     func gifFrames() -> [GameGIF.Frame] {
-        GameGIF.frames(size: boardSize, handicap: handicapStones, moves: moves)
+        GameGIF.frames(size: boardSize, setup: setup, moves: moves)
     }
 
     func toggleAnalysis() {
@@ -443,22 +482,51 @@ final class GameState {
     }
 
     /// Rebuild the engine's position from the current config + move record.
+    ///
+    /// Two paths, by base:
+    /// • Even game (no setup stones): the proven boardsize/komi/rules/clear_board
+    ///   + `play` sequence. This is every normal game and the app's default.
+    /// • Setup base (handicap or an edited/photo-imported puzzle, incl. explicit
+    ///   side-to-move): drive the engine with `loadsgf`, the only GTP path that
+    ///   reconstructs arbitrary two-color stones AND the side to move in one shot
+    ///   (`set_position` always forces Black to move). Rules/komi are re-applied
+    ///   afterward because `loadsgf` adopts the SGF's `RU`/`KM`, and those
+    ///   setters preserve the loaded position.
     private func syncEngineToRecord() async {
-        await session.command(GtpCommandBuilder.boardSize(boardSize))
+        if setup.isEmpty {
+            await session.command(GtpCommandBuilder.boardSize(boardSize))
+            await session.command(GtpCommandBuilder.komi(komi))
+            await session.command(GtpCommandBuilder.setKoRule(koRule.gtpToken))
+            await session.command(GtpCommandBuilder.setScoringRule(scoringRule.gtpToken))
+            await session.command(GtpCommandBuilder.clearBoard)
+            for m in moves {
+                if m.isPass {
+                    await session.command(GtpCommandBuilder.play(color: gtp(m.color), pass: true))
+                } else {
+                    await session.command(GtpCommandBuilder.play(color: gtp(m.color), x: m.x, yFromTop: m.y, size: boardSize))
+                }
+            }
+            return
+        }
+
+        // Setup base: load the full game (setup stones + PL + moves) via a temp
+        // SGF, then re-apply the app's komi/rules on top of the loaded position.
+        if let url = try? writeTempSGF(exportSGF()) {
+            await session.command(GtpCommandBuilder.loadSGF(path: url.path))
+            try? FileManager.default.removeItem(at: url)
+        }
         await session.command(GtpCommandBuilder.komi(komi))
         await session.command(GtpCommandBuilder.setKoRule(koRule.gtpToken))
         await session.command(GtpCommandBuilder.setScoringRule(scoringRule.gtpToken))
-        await session.command(GtpCommandBuilder.clearBoard)
-        if !handicapStones.isEmpty {
-            await session.command(GtpCommandBuilder.fixedHandicap(handicapStones.count))
-        }
-        for m in moves {
-            if m.isPass {
-                await session.command(GtpCommandBuilder.play(color: gtp(m.color), pass: true))
-            } else {
-                await session.command(GtpCommandBuilder.play(color: gtp(m.color), x: m.x, yFromTop: m.y, size: boardSize))
-            }
-        }
+    }
+
+    /// Write `sgf` to a uniquely-named, space-free temp file for `loadsgf`
+    /// (GTP splits its command line on spaces, so the path must not contain any).
+    private func writeTempSGF(_ sgf: String) throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("golearner-load-\(UUID().uuidString).sgf")
+        try sgf.write(to: url, atomically: true, encoding: .utf8)
+        return url
     }
 
     /// Decide what to do next: play the AI's move, refresh analysis, or nothing.
@@ -559,7 +627,7 @@ final class GameState {
 
     /// Recompute all observable board state from the move record at `currentPly`.
     private func refreshFromRecord() {
-        let pos = GoReplayKit.position(size: boardSize, handicap: handicapStones,
+        let pos = GoReplayKit.position(size: boardSize, setup: setup,
                                        moves: moves, plyLimit: currentPly)
         stones = GoReplayKit.cells(pos)
         blackCaptures = Int(pos.blackCaptures)
@@ -569,8 +637,9 @@ final class GameState {
         totalMoves = moves.count
         currentPly = min(currentPly, totalMoves)
 
-        // Side to move at the viewed ply: base color flipped by the moves applied.
-        let baseIsWhite = !handicapStones.isEmpty       // handicap → White opens
+        // Side to move at the viewed ply: the setup's base color, flipped once
+        // per move applied.
+        let baseIsWhite = setup.toMove == .white
         let flips = currentPly % 2 == 1
         sideToMove = (baseIsWhite != flips) ? .white : .black
 
