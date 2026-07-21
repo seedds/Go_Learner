@@ -53,6 +53,43 @@ enum ScoringRule: Int, CaseIterable, Identifiable {
     var gtpToken: String { self == .area ? "AREA" : "TERRITORY" }
 }
 
+/// AI thinking level, expressed as a per-move time budget. The engine binds on
+/// time (visits are effectively unbounded — see GtpCommandBuilder), so more
+/// seconds means a deeper search and stronger play. `.standard` (3s) preserves
+/// the app's original device budget. Cases are ordered by ascending time.
+enum AIDifficulty: String, CaseIterable, Identifiable {
+    case beginner, easy, standard, strong, max
+
+    var id: String { rawValue }
+
+    /// Per-move search budget in seconds (honored in full on device).
+    var seconds: Float {
+        switch self {
+        case .beginner: return 1
+        case .easy:     return 2
+        case .standard: return 3
+        case .strong:   return 6
+        case .max:      return 12
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .beginner: return "Beginner"
+        case .easy:     return "Easy"
+        case .standard: return "Standard"
+        case .strong:   return "Strong"
+        case .max:      return "Max"
+        }
+    }
+
+    /// Human-readable budget, e.g. "3s per move".
+    var detail: String {
+        let s = seconds == seconds.rounded() ? String(Int(seconds)) : String(seconds)
+        return "\(s)s per move"
+    }
+}
+
 @MainActor
 @Observable
 final class GameState {
@@ -116,13 +153,30 @@ final class GameState {
     /// Monotonic token so stale async results are ignored after new moves.
     private var generation: Int = 0
 
+    /// User-selectable AI thinking level, persisted across launches. Drives the
+    /// per-move time budget (`aiMaxTime`). Defaults to `.standard` (3s), the
+    /// app's original device budget.
+    var aiDifficulty: AIDifficulty {
+        didSet { UserDefaults.standard.set(aiDifficulty.rawValue, forKey: GameState.aiDifficultyKey) }
+    }
+    private static let aiDifficultyKey = "aiDifficulty"
+
+    /// Per-move search budget in seconds. The engine binds on time (visits are
+    /// unbounded), so this is the AI's strength knob. The simulator runs CoreML
+    /// on CPU (AGENTS.md), so cap it there to stay snappy; device honors the
+    /// full budget. At `.standard` this reproduces the original 1s(sim)/3s(device).
     #if targetEnvironment(simulator)
-    private let aiMaxTime: Float = 1.0        // CoreML on CPU in the sim; keep it snappy
+    private var aiMaxTime: Float { min(aiDifficulty.seconds, 1.0) }
     private let analysisMaxMoves = 12
     #else
-    private let aiMaxTime: Float = 3.0
+    private var aiMaxTime: Float { aiDifficulty.seconds }
     private let analysisMaxMoves = 30
     #endif
+
+    /// Stop streaming analysis once the reused search tree reaches this many
+    /// root visits. Win% has long converged by then; this bounds the tree's
+    /// memory (KataGo reuses the tree across reports on a static position).
+    private let analysisVisitCap = 50_000
 
     /// When hosted by the XCTest bundle, the app must NOT launch/drive the
     /// process-global engine: the test owns it, and a second GTP reader would
@@ -135,6 +189,8 @@ final class GameState {
     init(boardSize: Int = 19, komi: Float = 7.5) {
         self.boardSize = boardSize
         self.komi = komi
+        let savedDifficulty = UserDefaults.standard.string(forKey: GameState.aiDifficultyKey)
+        self.aiDifficulty = savedDifficulty.flatMap(AIDifficulty.init(rawValue:)) ?? .standard
         self.stones = Array(repeating: .empty, count: boardSize * boardSize)
         self.session = GameState.makeSession(boardSize: boardSize,
                                              launchEngine: !GameState.isRunningUnderTests)
@@ -407,7 +463,7 @@ final class GameState {
         if currentPlayerKind == .ai {
             await playAIMove()
         } else if analysisEnabled {
-            await runAnalysis()
+            runAnalysis()
         } else {
             statusMessage = "\(sideToMove == .black ? "Black" : "White") to play"
         }
@@ -440,17 +496,27 @@ final class GameState {
         await advance()   // chain AI-vs-AI or refresh human-turn analysis
     }
 
-    private func runAnalysis() async {
+    /// Stream analysis for the current position: repeatedly read one report,
+    /// refresh the overlay + win%/visits readout, and keep going while analysis
+    /// stays on and the position is unchanged. The reused search tree makes
+    /// visits accumulate and win% converge across reports; stop at the visit cap
+    /// so the tree's memory stays bounded. Runs as a detached task (non-blocking)
+    /// so it never stalls `advance()`; cancelled by any move/undo/toggle-off.
+    private func runAnalysis() {
         analysisTask?.cancel()
         let gen = generation
         let task = Task { @MainActor in
-            guard let parsed = await session.analyzeOnce(interval: 20, maxMoves: analysisMaxMoves, timeout: 20) else { return }
-            guard gen == self.generation, !Task.isCancelled else { return }
-            self.analysis = self.nnResult(from: parsed)
-            self.statusMessage = self.analysisSummary(parsed)
+            while self.analysisEnabled, !Task.isCancelled, gen == self.generation {
+                guard let parsed = await session.analyzeOnce(interval: 20, maxMoves: analysisMaxMoves, timeout: 20) else {
+                    break   // timeout/error: stop rather than hot-spin
+                }
+                guard gen == self.generation, !Task.isCancelled else { return }
+                self.analysis = self.nnResult(from: parsed)
+                self.statusMessage = self.analysisSummary(parsed)
+                if let visits = parsed.rootVisits, visits >= self.analysisVisitCap { break }
+            }
         }
         analysisTask = task
-        await task.value
     }
 
     /// Map an analyze report onto NNResult so AnalysisOverlay + the win-rate bar
