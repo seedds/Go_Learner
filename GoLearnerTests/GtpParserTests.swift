@@ -92,4 +92,25 @@ final class GtpParserTests: XCTestCase {
         XCTAssertNil(GtpAnalysisParser.parse("= Q16", size: 19))
         XCTAssertNil(GtpAnalysisParser.parse("", size: 19))
     }
+
+    // MARK: - NNResult candidate mapping (White → side-to-move)
+
+    func testCandidateMappingCarriesVisitsAndFlipsForBlack() {
+        let parsed = [
+            GtpCandidate(position: 10, visits: 120, winrateWhite: 0.55, scoreLeadWhite: 1.5),
+            GtpCandidate(position: nil, visits: 30, winrateWhite: 0.40, scoreLeadWhite: -2.0),
+        ]
+        // Black to move: winrate flips to 1 - White; visits pass through as-is.
+        let black = NNResult.candidates(from: parsed, blackToMove: true)
+        XCTAssertEqual(black.count, 2)
+        XCTAssertEqual(black[0].position, 10)
+        XCTAssertEqual(black[0].visits, 120)
+        XCTAssertEqual(black[0].winrateToMove, 0.45, accuracy: 1e-5)
+        XCTAssertNil(black[1].position) // pass preserved
+        XCTAssertEqual(black[1].winrateToMove, 0.60, accuracy: 1e-5)
+
+        // White to move: winrate stays White's.
+        let white = NNResult.candidates(from: parsed, blackToMove: false)
+        XCTAssertEqual(white[0].winrateToMove, 0.55, accuracy: 1e-5)
+    }
 }

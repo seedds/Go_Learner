@@ -525,21 +525,12 @@ final class GameState {
     /// the UI expects (to-move winrate; White-perspective ownership as before).
     private func nnResult(from a: GtpAnalysis) -> NNResult {
         let area = boardSize * boardSize
-        // Candidate policy as visit-share over board positions.
-        var policy = [Float](repeating: 0, count: area)
-        var passPolicy: Float = 0
-        let totalVisits = max(1, a.candidates.reduce(0) { $0 + $1.visits })
-        for c in a.candidates {
-            let share = Float(c.visits) / Float(totalVisits)
-            if let p = c.position, p >= 0, p < area { policy[p] = share } else { passPolicy = share }
-        }
         let blackToMove = sideToMove == .black
         // Engine emits winrate/lead from White's perspective; convert to to-move.
         let rootWhiteWin = a.rootWinrateWhite ?? 0.5
         let winToMove = blackToMove ? (1 - rootWhiteWin) : rootWhiteWin
         let whiteLead = a.rootScoreLeadWhite ?? 0
-        return NNResult(policy: policy,
-                        passPolicy: passPolicy,
+        return NNResult(candidates: NNResult.candidates(from: a.candidates, blackToMove: blackToMove),
                         winProbToMove: winToMove,
                         noResultProb: 0,
                         whiteScoreMean: whiteLead,
