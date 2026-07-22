@@ -67,19 +67,23 @@ enum BoardImageAnalysis {
             }
         }
 
-        // Background = median patch luma (robust to a few dark/bright stones and
-        // to overall lighting; the board wood dominates most intersections).
-        let background = median(means)
+        return classifyMeans(means, params: params)
+    }
 
-        var cells = [GoColor](repeating: .empty, count: size * size)
+    /// Threshold a flat array of patch-mean lumas into stones. Background = median
+    /// patch luma (robust to a few dark/bright stones and to overall lighting; the
+    /// board wood dominates most intersections), then each patch is black/white if
+    /// it's darker/brighter than the background by the configured delta. Shared by
+    /// the full-board classifier and the fragment classifier.
+    static func classifyMeans(_ means: [Double], params: Params = Params()) -> [GoColor] {
+        let background = median(means)
+        var cells = [GoColor](repeating: .empty, count: means.count)
         for i in 0..<means.count {
             let m = means[i]
             if background - m >= params.blackDelta {
                 cells[i] = .black
             } else if m - background >= params.whiteDelta {
                 cells[i] = .white
-            } else {
-                cells[i] = .empty
             }
         }
         return cells
@@ -99,7 +103,7 @@ enum BoardImageAnalysis {
     }
 
     /// Mean luma over the square patch of half-width `radius` around (cx, cy).
-    private static func patchMean(_ image: GrayImage, cx: Int, cy: Int, radius: Int) -> Double {
+    static func patchMean(_ image: GrayImage, cx: Int, cy: Int, radius: Int) -> Double {
         var sum = 0
         var n = 0
         let x0 = max(0, cx - radius), x1 = min(image.width - 1, cx + radius)
