@@ -54,8 +54,9 @@ struct BoardEditorView: View {
                 Spacer(minLength: 0)
             }
             .padding(.vertical, 12)
-            .background(Color(white: 0.11))
-            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(.systemBackground))
+            .foregroundStyle(.primary)
             .navigationTitle("Edit Position")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -140,11 +141,11 @@ struct BoardEditorView: View {
                     }
                     .padding(.horizontal, 14).padding(.vertical, 8)
                     .background(Capsule().fill(tool == t ? Color.accentColor.opacity(0.35)
-                                                         : Color.white.opacity(0.08)))
+                                                         : Color.primary.opacity(0.08)))
                     .overlay(Capsule().stroke(tool == t ? Color.accentColor : .clear, lineWidth: 1.5))
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(.white)
+                .foregroundStyle(.primary)
             }
         }
     }

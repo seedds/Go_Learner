@@ -13,11 +13,21 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(GameState.self) private var game
     @Environment(\.dismiss) private var dismiss
+    @AppStorage("appTheme") private var themeRaw = AppTheme.system.rawValue
 
     var body: some View {
         @Bindable var game = game
         NavigationStack {
             Form {
+                Section {
+                    Picker("Appearance", selection: $themeRaw) {
+                        ForEach(AppTheme.allCases) { theme in
+                            Text(theme.label).tag(theme.rawValue)
+                        }
+                    }
+                } header: {
+                    Text("Appearance")
+                }
                 Section {
                     Picker("Thinking Level", selection: $game.aiDifficulty) {
                         ForEach(AIDifficulty.allCases) { level in

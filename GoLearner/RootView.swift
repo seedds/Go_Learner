@@ -21,6 +21,8 @@ struct RootView: View {
     @State private var tab: AppTab = .play
     @State private var selection: SavedGame?
     @State private var showNewGame = false
+    /// App appearance (system/light/dark), shared with the Settings picker.
+    @AppStorage("appTheme") private var themeRaw = AppTheme.system.rawValue
     /// Suppresses autosave while we're loading a game into GameState (loading
     /// mutates the same state that would otherwise trigger a write-back).
     @State private var loading = false
@@ -42,6 +44,7 @@ struct RootView: View {
                 SettingsView()
             }
         }
+        .preferredColorScheme(AppTheme(rawValue: themeRaw)?.colorScheme)
         .task { ensureSelection() }
         .onChange(of: selection) { _, newValue in load(newValue) }
         .onChange(of: game.totalMoves) { _, _ in persist() }

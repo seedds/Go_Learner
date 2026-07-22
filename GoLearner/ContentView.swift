@@ -38,19 +38,23 @@ struct ContentView: View {
     }
 
     var body: some View {
-        VStack(spacing: 12) {
-            header
-            WinrateBar(blackWinrate: game.blackWinrate)
-                .padding(.horizontal)
-            BoardView()
-                .padding(.horizontal, 8)
-            statusLine
-            navigationStrip
-            controlStrip
+        ZStack {
+            Color(.systemBackground).ignoresSafeArea()
+            VStack(spacing: 12) {
+                header
+                WinrateBar(blackWinrate: game.blackWinrate)
+                    .padding(.horizontal)
+                BoardView()
+                    .padding(.horizontal, 8)
+                statusLine
+                navigationStrip
+                controlStrip
+            }
+            .padding(.vertical, 12)
+            .frame(maxHeight: .infinity)
         }
-        .padding(.vertical, 12)
-        .background(Color(white: 0.11))
-        .foregroundStyle(.white)
+        .foregroundStyle(.primary)
+        .safeAreaInset(edge: .top) { topBar }
         .fileImporter(isPresented: $importingSGF, allowedContentTypes: sgfTypes) { result in
             if case .success(let url) = result { loadSGF(from: url) }
         }
@@ -76,14 +80,11 @@ struct ContentView: View {
         editRequest = EditRequest(board: board)
     }
 
-    private var header: some View {
+    /// Top bar pinned to the safe-area top: holds the app menu as a discoverable
+    /// ellipsis button on the trailing edge. The Play tab has no NavigationStack,
+    /// so this stands in for a nav-bar toolbar.
+    private var topBar: some View {
         HStack {
-            PlayerCapsule(color: .black,
-                          kind: game.blackPlayer,
-                          captures: game.blackCaptures,
-                          isTurn: game.sideToMove == .black) {
-                game.setPlayer(game.blackPlayer == .human ? .ai : .human, for: .black)
-            }
             Spacer()
             Menu {
                 ShareLink("Share SGF", item: sgfExportURL(),
@@ -109,7 +110,22 @@ struct ContentView: View {
                     Label("Import from Photo", systemImage: "camera.viewfinder")
                 }
             } label: {
-                Text("GoLearner").font(.headline).foregroundStyle(.white)
+                Image(systemName: "ellipsis.circle")
+                    .font(.title2)
+                    .foregroundStyle(.primary)
+            }
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 4)
+    }
+
+    private var header: some View {
+        HStack {
+            PlayerCapsule(color: .black,
+                          kind: game.blackPlayer,
+                          captures: game.blackCaptures,
+                          isTurn: game.sideToMove == .black) {
+                game.setPlayer(game.blackPlayer == .human ? .ai : .human, for: .black)
             }
             Spacer()
             PlayerCapsule(color: .white,
@@ -140,11 +156,11 @@ struct ContentView: View {
     private var statusLine: some View {
         HStack(spacing: 8) {
             if game.thinking {
-                ProgressView().controlSize(.small).tint(.white)
+                ProgressView().controlSize(.small).tint(.primary)
             }
             Text(game.statusMessage)
                 .font(.subheadline.monospacedDigit().weight(game.gameOver ? .bold : .regular))
-                .foregroundStyle(game.gameOver ? Color.yellow : .white.opacity(0.85))
+                .foregroundStyle(game.gameOver ? Color.yellow : .primary.opacity(0.85))
         }
         .frame(height: 20)
     }
@@ -155,7 +171,7 @@ struct ContentView: View {
             NavButton(system: "chevron.left", disabled: !game.canStepBackward) { game.stepBackward() }
             Text("\(game.currentPly)/\(game.totalMoves)")
                 .font(.caption.monospacedDigit())
-                .foregroundStyle(game.isReviewing ? Color.yellow : .white.opacity(0.7))
+                .foregroundStyle(game.isReviewing ? Color.yellow : .primary.opacity(0.7))
                 .frame(minWidth: 52)
             NavButton(system: "chevron.right", disabled: !game.canStepForward) { game.stepForward() }
             NavButton(system: "forward.end.fill", disabled: !game.canStepForward) { game.stepToEnd() }
@@ -217,7 +233,7 @@ private struct NavButton: View {
             Image(systemName: system).font(.title3)
         }
         .buttonStyle(.plain)
-        .foregroundStyle(disabled ? .white.opacity(0.25) : .white)
+        .foregroundStyle(disabled ? Color.primary.opacity(0.25) : Color.primary)
         .disabled(disabled)
     }
 }
@@ -244,14 +260,14 @@ private struct PlayerCapsule: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
             .background(
-                Capsule().fill(isTurn ? Color.accentColor.opacity(0.35) : Color.white.opacity(0.08))
+                Capsule().fill(isTurn ? Color.accentColor.opacity(0.35) : Color.primary.opacity(0.08))
             )
             .overlay(
                 Capsule().stroke(isTurn ? Color.accentColor : .clear, lineWidth: 1.5)
             )
         }
         .buttonStyle(.plain)
-        .foregroundStyle(.white)
+        .foregroundStyle(.primary)
     }
 }
 
@@ -268,7 +284,7 @@ private struct ControlButton: View {
                     .font(.title2)
                 Text(label).font(.caption2)
             }
-            .foregroundStyle(active ? Color.accentColor : .white)
+            .foregroundStyle(active ? Color.accentColor : .primary)
         }
         .buttonStyle(.plain)
     }
