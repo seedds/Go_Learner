@@ -28,7 +28,7 @@ final class GtpParserTests: XCTestCase {
 
     func testPlayAndGenmoveCommands() {
         XCTAssertEqual(GtpCommandBuilder.play(color: "B", x: 15, yFromTop: 3, size: 19), "play B Q16")
-        XCTAssertEqual(GtpCommandBuilder.play(color: "W", pass: true), "play W pass")
+        XCTAssertEqual(GtpCommandBuilder.playPass(color: "W"), "play W pass")
         XCTAssertEqual(GtpCommandBuilder.genmove(color: "B"), "genmove B")
         XCTAssertEqual(GtpCommandBuilder.komi(7.5), "komi 7.5")
         XCTAssertEqual(GtpCommandBuilder.setKoRule("POSITIONAL"), "kata-set-rule ko POSITIONAL")

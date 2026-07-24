@@ -60,11 +60,12 @@ Backend device assignments (one code per NN-server thread; `0` = MLX/GPU,
 ### 2.3 Commands & parsing
 `GtpCommandBuilder` builds the command strings (vertex mapping skips column `I`,
 rows count from the bottom; `boardsize`, `komi`, `kata-set-rule`, `play`,
-`genmove`, `fixed_handicap`, `kata-analyze`). `GtpAnalysisParser` turns one
+`loadsgf`, `genmove`, `kata-analyze`). `GtpAnalysisParser` turns one
 `kata-analyze` report into candidates + ownership + rootInfo. **winrate/scoreLead
 are emitted from White's perspective** (the shipped `reportAnalysisWinratesAs =
-WHITE`); `GameState.nnResult(from:)` converts to the side-to-move / Black
-perspective the UI expects.
+WHITE`); the `WinProb.fromWhite` helper is the single place that conversion to
+the side-to-move / Black perspective lives, used by `GameState.nnResult(from:)`,
+the status summary, and the win-rate bar.
 
 ---
 
@@ -74,8 +75,13 @@ perspective the UI expects.
 and mirrors every live move to the engine (`play` / `genmove` / `undo`). The
 observable board state (`stones`, captures, `lastMove`, `sideToMove`) is recomputed
 by replaying that record through `GoReplay` at the viewed ply — so review
-navigation is just a `plyLimit`, and the live game (and engine) is never disturbed
-while reviewing. GIF frames and library thumbnails use the same replay path.
+*navigation* is just a `plyLimit`, and the live game (and engine) is never
+disturbed by stepping through it. GIF frames and library thumbnails use the same
+replay path. Playing a move *while* reviewing is the one exception: a tap at a
+past ply **branches** — `humanPlay` truncates the record to the viewed ply,
+appends the new stone, and rebuilds the engine to that line via
+`syncEngineToRecord`. So reviewing is render-only, but a deliberate move from a
+past position starts a new line (there is no separate "confirm branch" step).
 
 `GoReplay` builds a fresh `Board`/`BoardHistory` per call, applies KataGo's rules
 (captures, ko, legality), and returns a stone grid. It calls `Board::initHash()`
@@ -115,8 +121,10 @@ with hand-built puzzles.
 ## 4. Gotchas discovered (don't relearn these)
 
 1. **One engine per process / one reader.** Two `getMessageLine()` readers on the
-   shared GTP output deadlock. `GameState` skips engine launch under XCTest.
-2. **1 MB engine thread stack** — see §2.1.
+   shared GTP output deadlock. `GameState` skips engine launch under XCTest, and
+   holds a single `GameSession` for the process lifetime (board size is a
+   per-command parameter, so switching sizes never rebuilds the session).
+2. **8 MB engine thread stack** — see §2.1.
 3. **Capture-count fields are inverted vs their names:** KataGo's
    `numWhiteCaptures` = white stones removed = Black's prisoners. Handled in
    `GoReplay.mm`.
@@ -136,23 +144,30 @@ with hand-built puzzles.
 ```
 User taps intersection
   └─ BoardView tap → GameState.humanPlay(x,y)
-       ├─ GoReplay.isLegal(record + candidate)      // rules check, engine-free
-       ├─ append to move record; generation += 1; refreshFromRecord() (GoReplay)
+       ├─ GoReplay.isLegal(base + candidate)         // rules check, engine-free
+       ├─ (if reviewing) truncate record to viewed ply — branch a new line
+       ├─ append to move record; generation/recordVersion += 1; refreshFromRecord()
        └─ Task:
-            ├─ session.command("play <color> <vertex>")   // mirror to engine
+            ├─ branch → session syncEngineToRecord()  // rebuild engine to the line
+            │  else   → session.command("play <color> <vertex>")  // mirror one move
             └─ advance()
                  ├─ if next player is AI → playAIMove()
                  │     ├─ session set maxVisits/maxTime
                  │     ├─ vertex = await session.genMove(color)
                  │     ├─ guard generation unchanged (drop stale results)
-                 │     └─ append engine move → refreshFromRecord() → advance()
+                 │     └─ applyGenMove(vertex): vertex/pass append a move,
+                 │        "resign" ends the game → refreshFromRecord() → advance()
                  └─ else if analysisEnabled → runAnalysis()
-                       └─ session.analyzeOnce → GtpAnalysisParser → NNResult (overlay)
+                       └─ loop: session.analyzeOnce → NNResult (overlay), until the
+                          position changes or root visits hit the cap (streaming)
 ```
 
 **Staleness:** every state mutation bumps `GameState.generation`. Async engine
 results compare their captured token against the current one and no-op if the
-user has moved on.
+user has moved on. A parallel `recordVersion` counter bumps on every
+*persistable* change (played move, resignation, new/configured/committed/imported
+game); `RootView` observes it to autosave — including 0-move edits that
+`totalMoves` alone would miss.
 
 ---
 
@@ -163,7 +178,7 @@ user has moved on.
 | Downloadable nets / model picker | Model store + `InProcessKataGoEngine.launch` model path; catalog UI. See ROADMAP R2 |
 | Human-SL profiles | Bundle the human net, restore `humanSL*` cfg, add profile → visit-budget in `GtpCommandBuilder`. ROADMAP R5 |
 | GTP console | A view over `GameSession` raw command/line I/O. ROADMAP R4 |
-| Sub-19 board sizes | `GameState.boardSize`, `rectangular_boardsize`, star points in `BoardView`. ROADMAP A4b |
+| Sub-19 board sizes | `GameState.boardSize`, `boardsize` GTP command, star points in `BoardView`. ROADMAP A4b |
 | Setup positions / puzzles | `SetupPosition`, `GameState.commitSetup`, `EditorBoard`/`BoardEditorView`; `loadsgf` sync |
 | Better photo recognition | Implement `BoardRecognizer` (e.g. port OpenCV `GobanRecogKit`); swap for `VisionBoardRecognizer` |
 | Learning features | New views reading `NNResult` / `GtpAnalysis` |

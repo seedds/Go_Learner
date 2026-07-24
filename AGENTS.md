@@ -146,7 +146,7 @@ garbage ⇒ a feature-encoding or decode regression.
 | Analysis overlay | `GoLearner/AnalysisOverlay.swift` |
 | Setup base (both-color stones + side-to-move) | `GoLearner/SetupPosition.swift` |
 | Free board editor (puzzles) | `GoLearner/EditorBoard.swift` (pure), `GoLearner/BoardEditorView.swift` |
-| Photo/camera position import | `GoLearner/Recognition/**` (`RecognizedBoard`, `BoardRecognizer`, `VisionBoardRecognizer`, `BoardImageAnalysis`, `PhotoImportView`, `CameraCaptureView`) |
+| Photo/camera position import | `GoLearner/Recognition/**` (`RecognizedBoard`, `BoardRecognizer`, `VisionBoardRecognizer`, `BoardImageAnalysis`, `PhotoImportView`, `CameraCaptureView`; fragment/partial-board: `FragmentBoardRecognizer`, `FragmentAnalysis`, `RecognizedFragment`, `CropView`) |
 | Project definition | `project.yml` (→ `xcodegen`) |
 | Tests | `GoLearnerTests/` (host-based) |
 

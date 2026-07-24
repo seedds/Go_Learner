@@ -141,10 +141,6 @@ ostream outToKataGo(&tsbToKataGo);
     outToKataGo << command.UTF8String << endl;
 }
 
-+ (void)sendMessage:(NSString *)message {
-    cout << message.UTF8String;
-}
-
 + (void)clearMessages {
     tsbFromKataGo.clear();
 }

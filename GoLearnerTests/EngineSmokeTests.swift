@@ -30,7 +30,7 @@ final class EngineSmokeTests: XCTestCase {
         InProcessKataGoEngine.launch(modelPath: modelPath, configPath: configPath)
 
         let engine = InProcessKataGoEngine()
-        let session = GameSession(engine: engine, boardSize: 19)
+        let session = GameSession(engine: engine)
         Self.session = session
 
         // Boot + handshake (first model load + CoreML compile is slow on the sim).
@@ -75,7 +75,7 @@ final class EngineSmokeTests: XCTestCase {
 
         // Analyze the current position; expect at least one candidate.
         await session.command(GtpCommandBuilder.clearBoard)
-        guard let analysis = await session.analyzeOnce(interval: 20, maxMoves: 20, timeout: 60) else {
+        guard let analysis = await session.analyzeOnce(size: 19, interval: 20, maxMoves: 20, timeout: 60) else {
             XCTFail("no analyze report parsed")
             return
         }
@@ -116,8 +116,8 @@ final class EngineSmokeTests: XCTestCase {
 
             // Finish the game (B already moved via genmove; W + B pass) so
             // final_score uses the finished-game branch, as the app does.
-            await session.command(GtpCommandBuilder.play(color: "W", pass: true))
-            await session.command(GtpCommandBuilder.play(color: "B", pass: true))
+            await session.command(GtpCommandBuilder.playPass(color: "W"))
+            await session.command(GtpCommandBuilder.playPass(color: "B"))
             let score = await session.command("final_score")
             XCTAssertTrue(score.ok, "\(size): final_score should return an ok reply")
         }

@@ -11,9 +11,10 @@ on-device, offline.
 > Status: **P0 engine pivot shipped.** The app embeds the complete KataGo engine
 > and drives it over GTP (real MCTS search, native rules/SGF, MLX + CoreML mux),
 > instead of the earlier hand-ported NN slice. Builds and runs on the iOS 26
-> simulator (runtime self-check `genmove=Q16`, 41 tests green). See
+> simulator (runtime self-check opens on a corner/star-point, 114 tests green).
+> Since P0, sub-19 boards and photo/camera position import have landed too. See
 > [ROADMAP.md](ROADMAP.md) for what's next (downloadable nets, human-style
-> profiles, GTP console, photo import, sub-19 boards).
+> profiles, GTP console).
 
 ---
 
@@ -36,19 +37,23 @@ keeps everything else small and modern SwiftUI.
 
 ### Scope today
 
-- 19×19 board, configurable komi, area/territory + ko rules.
+- 9×9 / 13×13 / 19×19 boards, configurable komi, area/territory + ko rules.
 - Human vs AI, AI vs AI, or Human vs Human (tap a player capsule to toggle).
-- Full MCTS search per move via the embedded engine (time-bounded).
+- Full MCTS search per move via the embedded engine (time-bounded; the AI
+  thinking-time budget is a Settings knob).
 - Live analysis overlay from `kata-analyze`: win rate, score lead, ownership
-  shading, top candidate moves.
-- Move navigation + win-rate bar, SGF import/export, SwiftData game library,
-  rules/komi + player setup, handicap, GIF export. Pass, undo, new game.
+  shading, and top candidate moves with per-move win% + visits.
+- Move navigation + win-rate bar (tap a past position to branch a new line),
+  SGF import/export, SwiftData game library, rules/komi + player setup,
+  handicap, GIF export, pass, new game.
+- Set an arbitrary position: a free board editor and photo/camera import
+  (whole board or a cropped fragment), for puzzles and studying real games.
+- Light / dark / system theme.
 
 ### Not present yet (post-P0 roadmap)
 
-- Multiple board sizes (9×9 / 13×13) — now unblocked by the engine.
 - Downloadable networks, human-style (human-SL) profiles, a GTP console,
-  photo import, a backend picker + CoreML cache UI.
+  a backend picker + CoreML cache UI.
 - iCloud sync.
 - Learning features (tsumego, guided "why this move") — the namesake direction.
 
@@ -72,7 +77,7 @@ keeps everything else small and modern SwiftUI.
 ```
 
 - The **engine runs in-process over GTP** (one engine per process): `KataGoGTP`
-  rebinds its `cout`/`cin` to thread-safe buffers on a dedicated 1 MB-stack
+  rebinds its `cout`/`cin` to thread-safe buffers on a dedicated 8 MB-stack
   thread; `GameSession` serializes command/response traffic.
 - **Live play/analysis** go to the engine; **offline board reconstruction**
   (rendering, review, GIF, thumbnails) replays the Swift move-list through the
@@ -106,15 +111,23 @@ GoLearner/
 │       ├── KataGoSwift/          ← Swift⇄C++ CoreML/MLX backend
 │       └── ThirdParty/mlx-swift/ ← vendored MLX
 └── GoLearner/                    ← the SwiftUI app target
-    ├── GoLearnerApp.swift        ← @main entry
-    ├── ContentView.swift         ← screen: capsules, board, controls
+    ├── GoLearnerApp.swift        ← @main entry (SwiftData container)
+    ├── RootView.swift            ← Play / History / Settings tabs + autosave
+    ├── ContentView.swift         ← Play screen: capsules, board, controls
     ├── BoardView.swift           ← goban rendering + tap input
     ├── AnalysisOverlay.swift     ← ownership + candidate-move overlay
     ├── GameState.swift           ← @MainActor @Observable model (the brain)
     ├── GameSession.swift         ← actor: serializes GTP traffic
     ├── GtpCommandBuilder.swift   ← Config → GTP command strings
     ├── GtpAnalysisParser.swift   ← kata-analyze → candidates/ownership/root
-    └── GoReplayKit.swift         ← Swift facade over GoReplay
+    ├── GoReplayKit.swift         ← Swift facade over GoReplay
+    ├── SGF.swift                 ← SGF codec (setup stones + PL + result)
+    ├── SetupPosition.swift       ← pre-move base (both-color stones + turn)
+    ├── SavedGame.swift           ← SwiftData model (SGF is source of truth)
+    ├── LibraryView / NewGameView / SettingsView / AppTheme.swift
+    ├── EditorBoard + BoardEditorView.swift  ← free board editor (puzzles)
+    ├── GameGIF + GIFExportView.swift        ← animated-GIF export
+    └── Recognition/             ← photo/camera position import (Vision + CI)
 ```
 
 ---

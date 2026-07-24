@@ -18,11 +18,9 @@ import Foundation
 
 actor GameSession {
     private let engine: KataGoEngineIO
-    let boardSize: Int
 
-    init(engine: KataGoEngineIO, boardSize: Int = 19) {
+    init(engine: KataGoEngineIO) {
         self.engine = engine
-        self.boardSize = boardSize
     }
 
     /// One GTP reply: the joined payload lines and whether it was `=` (ok).
@@ -88,7 +86,8 @@ actor GameSession {
     /// Run a one-shot analysis: arm `kata-analyze`, read the first report,
     /// then stop the stream with `name` (a no-op command that also flushes).
     /// Returns the parsed analysis, or nil if none arrived before `timeout`.
-    func analyzeOnce(interval: Int = 20, maxMoves: Int = 30,
+    /// `size` is the board being analyzed (used to decode vertices/ownership).
+    func analyzeOnce(size: Int, interval: Int = 20, maxMoves: Int = 30,
                      timeout: TimeInterval = 30) -> GtpAnalysis? {
         engine.sendCommand(GtpCommandBuilder.setMaxVisits(GtpCommandBuilder.unboundedMaxVisits))
         engine.sendCommand(GtpCommandBuilder.analyze(interval: interval, maxMoves: maxMoves))
@@ -96,7 +95,7 @@ actor GameSession {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             let line = engine.getMessageLine()
-            if let a = GtpAnalysisParser.parse(line, size: boardSize) {
+            if let a = GtpAnalysisParser.parse(line, size: size) {
                 result = a
                 break
             }

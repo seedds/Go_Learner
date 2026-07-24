@@ -21,6 +21,29 @@ private struct EditRequest: Identifiable {
     let board: EditorBoard
 }
 
+/// A shareable SGF game. The `.sgf` file is materialized lazily — only when the
+/// share sheet actually resolves it — so browsing the menu costs no file I/O,
+/// and each export gets a unique path (no races between concurrent shares).
+private struct SGFDocument: Transferable {
+    let text: String
+    let name: String
+
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(exportedContentType: .sgf) { doc in
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("\(doc.name)-\(UUID().uuidString).sgf")
+            try doc.text.write(to: url, atomically: true, encoding: .utf8)
+            return SentTransferredFile(url)
+        }
+    }
+}
+
+private extension UTType {
+    /// SGF (Smart Game Format). Falls back to plain text where the extension
+    /// isn't registered on the system.
+    static var sgf: UTType { UTType(filenameExtension: "sgf") ?? .plainText }
+}
+
 struct ContentView: View {
     @Environment(GameState.self) private var game
     @Binding var showNewGame: Bool
@@ -87,7 +110,8 @@ struct ContentView: View {
         HStack {
             Spacer()
             Menu {
-                ShareLink("Share SGF", item: sgfExportURL(),
+                ShareLink("Share SGF",
+                          item: SGFDocument(text: game.exportSGF(), name: "GoLearner-game"),
                           preview: SharePreview("GoLearner game"))
                 Button {
                     importingSGF = true
@@ -136,14 +160,6 @@ struct ContentView: View {
             }
         }
         .padding(.horizontal)
-    }
-
-    /// Write the current game to a temp `.sgf` file so ShareLink can export it.
-    private func sgfExportURL() -> URL {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("GoLearner-game.sgf")
-        try? game.exportSGF().write(to: url, atomically: true, encoding: .utf8)
-        return url
     }
 
     private func loadSGF(from url: URL) {

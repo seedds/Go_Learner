@@ -44,10 +44,6 @@ NS_ASSUME_NONNULL_BEGIN
 /// Send one GTP command to the engine (a newline is appended).
 + (void)sendCommand:(NSString *)command;
 
-/// Inject a raw message into the engine's OUTPUT buffer (used to nudge a blocked
-/// reader during teardown).
-+ (void)sendMessage:(NSString *)message;
-
 /// Drop buffered, not-yet-read output lines left by a prior engine run.
 + (void)clearMessages;
 

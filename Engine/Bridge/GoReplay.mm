@@ -56,12 +56,6 @@ void ensureHashInit() {
 - (int)blackCaptures { return _blackCaptures; }
 - (int)whiteCaptures { return _whiteCaptures; }
 
-- (GoColor)colorAtX:(int)x y:(int)y {
-    if (x < 0 || y < 0 || x >= _size || y >= _size) return GoColorEmpty;
-    const uint8_t *bytes = (const uint8_t *)_cells.bytes;
-    return (GoColor)bytes[y * _size + x];
-}
-
 @end
 
 // Place the setup base (Black stones, then White stones) and set the side to

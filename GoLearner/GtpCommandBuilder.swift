@@ -31,16 +31,14 @@ enum GtpCommandBuilder {
     static let clearBoard = "clear_board"
     static func komi(_ komi: Float) -> String { "komi \(komi)" }
 
-    /// Play `color` ("B"/"W") at a 0-indexed (x, yFromTop), or pass.
+    /// Play `color` ("B"/"W") at a 0-indexed (x, yFromTop).
     static func play(color: String, x: Int, yFromTop: Int, size: Int) -> String {
         "play \(color) \(vertex(x: x, yFromTop: yFromTop, size: size))"
     }
-    static func play(color: String, pass: Bool) -> String { "play \(color) pass" }
+    /// Play a pass for `color` ("B"/"W").
+    static func playPass(color: String) -> String { "play \(color) pass" }
 
     static func genmove(color: String) -> String { "genmove \(color)" }
-
-    /// Fixed handicap placement (engine chooses the standard points).
-    static func fixedHandicap(_ count: Int) -> String { "fixed_handicap \(count)" }
 
     /// Load a game from an SGF file at `path`, reconstructing setup stones
     /// (`AB`/`AW`), the side to move (`PL`), and the move list. The engine

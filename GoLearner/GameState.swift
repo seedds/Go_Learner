@@ -90,6 +90,23 @@ enum AIDifficulty: String, CaseIterable, Identifiable {
     }
 }
 
+/// A win probability plus whose turn it is, so the three UI readouts (win-rate
+/// bar, analysis overlay, status line) can each read the perspective they need
+/// without repeating the flip. The engine reports winrates from White's
+/// perspective (shipped cfg's `reportAnalysisWinratesAs=WHITE`); `fromWhite`
+/// is the single place that conversion lives.
+struct WinProb {
+    /// Probability the side to move wins (0…1).
+    let toMove: Float
+    let blackToMove: Bool
+    /// Probability Black wins (0…1).
+    var black: Float { blackToMove ? toMove : 1 - toMove }
+    /// Build from the engine's White-perspective winrate.
+    static func fromWhite(_ white: Float, blackToMove: Bool) -> WinProb {
+        WinProb(toMove: blackToMove ? 1 - white : white, blackToMove: blackToMove)
+    }
+}
+
 @MainActor
 @Observable
 final class GameState {
@@ -116,7 +133,15 @@ final class GameState {
     private(set) var sideToMove: GoColor = .black
     private(set) var moveCount: Int = 0
     private(set) var gameOver: Bool = false
+    /// Human-readable outcome for the status line (e.g. "Black wins by 3.5").
     private(set) var gameResultText: String? = nil
+    /// SGF `RE` value for the outcome (e.g. "B+3.5", "W+R", "0"), or nil while
+    /// the game is unfinished. Kept distinct from `gameResultText` so exported
+    /// SGF carries a valid result code rather than the display string.
+    private(set) var sgfResultCode: String? = nil
+    /// Set when a player resigns (the loser's color); the game is then over by
+    /// resignation rather than by score. Cleared on any record reset / new line.
+    private(set) var resignedBy: GoColor? = nil
 
     // MARK: Review / navigation
     /// Total moves in the live game (the tip of history).
@@ -130,8 +155,9 @@ final class GameState {
     /// Black's win probability from the latest analysis, or nil if none yet.
     var blackWinrate: Double? {
         guard let a = analysis else { return nil }
-        let black = sideToMove == .black ? a.winProbToMove : 1 - a.winProbToMove
-        return Double(black)
+        // analysis.winProbToMove is already side-to-move; recover Black's share.
+        let wp = WinProb(toMove: a.winProbToMove, blackToMove: sideToMove == .black)
+        return Double(wp.black)
     }
 
     // MARK: Player assignment
@@ -146,14 +172,21 @@ final class GameState {
     private(set) var modelReady: Bool = false
 
     // MARK: Engine + record
-    /// Rebuilt when the board size changes (the actor's size is immutable); the
-    /// underlying process-global engine is launched once and reused.
-    private var session: GameSession
+    /// The single GTP session for this process's lifetime. Board size is a
+    /// per-command parameter (not baked into the actor), so switching sizes never
+    /// replaces it — one actor guarantees a single reader of the shared engine
+    /// output stream (AGENTS.md hard constraint #1).
+    private let session: GameSession
     /// The live game's move record (the tip). Rendering/review replay from this.
     private var moves: [ReplayMove] = []
     private var analysisTask: Task<Void, Never>? = nil
     /// Monotonic token so stale async results are ignored after new moves.
     private var generation: Int = 0
+    /// Monotonic counter bumped whenever the persisted record changes (a played
+    /// move, a resignation, or a new/configured/committed/imported game). The
+    /// persistence layer observes this to autosave — including 0-move edits that
+    /// `totalMoves` alone would miss.
+    private(set) var recordVersion: Int = 0
 
     /// User-selectable AI thinking level, persisted across launches. Drives the
     /// per-move time budget (`aiMaxTime`). Defaults to `.standard` (3s), the
@@ -194,8 +227,7 @@ final class GameState {
         let savedDifficulty = UserDefaults.standard.string(forKey: GameState.aiDifficultyKey)
         self.aiDifficulty = savedDifficulty.flatMap(AIDifficulty.init(rawValue:)) ?? .standard
         self.stones = Array(repeating: .empty, count: boardSize * boardSize)
-        self.session = GameState.makeSession(boardSize: boardSize,
-                                             launchEngine: !GameState.isRunningUnderTests)
+        self.session = GameState.makeSession(launchEngine: !GameState.isRunningUnderTests)
         refreshFromRecord()
         if !GameState.isRunningUnderTests {
             Task { await warmUp() }
@@ -204,25 +236,23 @@ final class GameState {
 
     /// Build the engine session. Launches the in-process engine unless suppressed
     /// (under tests, where the test owns the single process-global engine).
-    private static func makeSession(boardSize: Int, launchEngine: Bool) -> GameSession {
+    private static func makeSession(launchEngine: Bool) -> GameSession {
         if launchEngine {
             let bundle = Bundle.main
             let modelPath = bundle.path(forResource: "default_model", ofType: "bin.gz") ?? ""
             let configPath = bundle.path(forResource: "default_gtp", ofType: "cfg") ?? ""
             InProcessKataGoEngine.launch(modelPath: modelPath, configPath: configPath)
         }
-        return GameSession(engine: InProcessKataGoEngine(), boardSize: boardSize)
+        return GameSession(engine: InProcessKataGoEngine())
     }
 
-    /// Switch the game to a new board size: rebuild the session (its size is
-    /// immutable) against the already-launched engine and resize the render
-    /// buffer. Caller is responsible for resetting the engine to the new record.
+    /// Switch the game to a new board size: resize the render buffer. The engine
+    /// session is unchanged (board size is a per-command parameter); the caller
+    /// resets the engine to the new record via `syncEngineToRecord`.
     private func adoptBoardSize(_ size: Int) {
         guard size != boardSize else { return }
         boardSize = size
         stones = Array(repeating: .empty, count: size * size)
-        session = GameState.makeSession(boardSize: size,
-                                        launchEngine: !GameState.isRunningUnderTests)
     }
 
     private func warmUp() async {
@@ -260,15 +290,26 @@ final class GameState {
 
     // MARK: - Intent
 
-    func newGame() {
-        generation += 1
-        analysisTask?.cancel()
-        setup = .empty
-        moves = []
+    /// The reset shared by new game / configure / commit-setup / import: swap in
+    /// a fresh `setup` + move record, clear analysis + any resignation, bump the
+    /// staleness + persistence tokens, re-render, and (once the engine is ready)
+    /// rebuild it to match. Opens at the record tip.
+    private func resetRecord(setup: SetupPosition, moves: [ReplayMove] = [], status: String) {
+        self.setup = setup
+        self.moves = moves
+        currentPly = moves.count
         analysis = nil
+        resignedBy = nil
+        analysisTask?.cancel()
+        generation += 1
+        recordVersion += 1
         refreshFromRecord()
-        statusMessage = modelReady ? "New game" : statusMessage
+        statusMessage = modelReady ? status : statusMessage
         Task { await resetEngineAndAdvance() }
+    }
+
+    func newGame() {
+        resetRecord(setup: .empty, status: "New game")
     }
 
     /// Start a fresh game with new board size, komi/rules and player assignment.
@@ -283,14 +324,8 @@ final class GameState {
         self.scoringRule = scoringRule
         self.blackPlayer = blackPlayer
         self.whitePlayer = whitePlayer
-        setup = SetupPosition.handicap(count: handicap, boardSize: boardSize)
-        generation += 1
-        analysisTask?.cancel()
-        moves = []
-        analysis = nil
-        refreshFromRecord()
-        statusMessage = modelReady ? "New game" : statusMessage
-        Task { await resetEngineAndAdvance() }
+        resetRecord(setup: SetupPosition.handicap(count: handicap, boardSize: boardSize),
+                    status: "New game")
     }
 
     /// Whether `setup` can be committed as a starting position: its stones must
@@ -315,14 +350,7 @@ final class GameState {
             statusMessage = "Invalid position (a stone has no liberties)"
             return
         }
-        self.setup = setup
-        generation += 1
-        analysisTask?.cancel()
-        moves = []
-        analysis = nil
-        refreshFromRecord()
-        statusMessage = modelReady ? "Position set" : statusMessage
-        Task { await resetEngineAndAdvance() }
+        resetRecord(setup: setup, status: "Position set")
     }
 
     /// A tap on an intersection. At the live tip this plays the side-to-move's
@@ -352,9 +380,11 @@ final class GameState {
         moves.append(.play(color, x, y))
         currentPly = moves.count   // play follows the tip so the stone shows immediately
         generation += 1
+        recordVersion += 1
         if branching {
             analysisTask?.cancel()
             analysis = nil
+            resignedBy = nil   // a new line supersedes any prior resignation
         }
         refreshFromRecord()
         Task {
@@ -375,9 +405,10 @@ final class GameState {
         moves.append(.pass(color))
         currentPly = moves.count   // live play follows the tip
         generation += 1
+        recordVersion += 1
         refreshFromRecord()
         Task {
-            if modelReady { await session.command(GtpCommandBuilder.play(color: gtp(color), pass: true)) }
+            if modelReady { await session.command(GtpCommandBuilder.playPass(color: gtp(color))) }
             await advance()
         }
     }
@@ -422,32 +453,36 @@ final class GameState {
                            // default, so normal/handicap games stay PL-free and
                            // edited puzzles carry their explicit turn.
                            playerToMove: setup.needsExplicitPlayerToMove ? setup.toMove : nil,
-                           result: gameOver ? gameResultText : nil)
+                           result: gameOver ? sgfResultCode : nil)
         return SGF.serialize(game)
     }
 
     /// Replace the live game with the main line parsed from `text`, adopting the
     /// SGF's board size (a saved 9×9 game loads into a 19×19 state and vice
-    /// versa). Returns false only if the SGF can't be parsed.
+    /// versa). Returns false — leaving the current game untouched — if the SGF
+    /// can't be parsed OR its setup stones aren't physically placeable (a
+    /// zero-liberty group), since the engine's `loadsgf` would reject the latter
+    /// and desync the display from the engine (AGENTS.md setup trap).
     @discardableResult
     func importSGF(_ text: String, koRule: KoRule? = nil, scoringRule: ScoringRule? = nil) -> Bool {
         guard let parsed = try? SGF.parse(text) else { return false }
+        // Validate the setup base against the *parsed* size before mutating any
+        // state, so a bad file can't leave the engine and UI out of sync.
+        let importedSetup = SetupPosition(sgf: parsed)
+        guard GoReplayKit.isPlaceableSetup(size: parsed.boardSize, setup: importedSetup) else {
+            statusMessage = "Can't import: invalid position (a stone has no liberties)"
+            return false
+        }
+        // Keep only moves that replay legally (best-effort import), so the record
+        // never desyncs from the engine.
+        let legal = GoReplayKit.legalMoves(size: parsed.boardSize, setup: importedSetup,
+                                           candidates: GoReplayKit.replayMoves(from: parsed.moves))
         adoptBoardSize(parsed.boardSize)
         komi = parsed.komi
         if let koRule { self.koRule = koRule }
         if let scoringRule { self.scoringRule = scoringRule }
-        setup = SetupPosition(sgf: parsed)
-        // Keep only moves that replay legally (best-effort import), so the record
-        // never desyncs from the engine.
-        moves = GoReplayKit.legalMoves(size: boardSize, setup: setup,
-                                       candidates: GoReplayKit.replayMoves(from: parsed.moves))
-        currentPly = moves.count   // open a loaded game at the latest move, not review mode
-        generation += 1
-        analysisTask?.cancel()
-        analysis = nil
-        refreshFromRecord()
-        statusMessage = "Imported \(moveCount) moves"
-        Task { await resetEngineAndAdvance() }
+        resetRecord(setup: importedSetup, moves: legal,
+                    status: "Imported \(legal.count) moves")
         return true
     }
 
@@ -501,7 +536,7 @@ final class GameState {
             await session.command(GtpCommandBuilder.clearBoard)
             for m in moves {
                 if m.isPass {
-                    await session.command(GtpCommandBuilder.play(color: gtp(m.color), pass: true))
+                    await session.command(GtpCommandBuilder.playPass(color: gtp(m.color)))
                 } else {
                     await session.command(GtpCommandBuilder.play(color: gtp(m.color), x: m.x, yFromTop: m.y, size: boardSize))
                 }
@@ -560,8 +595,21 @@ final class GameState {
         guard gen == generation else { return }   // superseded by a user action
         guard let vertex else { statusMessage = "Engine error"; return }
 
+        applyGenMove(vertex: vertex, for: color)
+        await advance()   // chain AI-vs-AI, refresh analysis, or show game-over
+    }
+
+    /// Apply an engine `genmove` reply — a GTP vertex ("Q16"), "pass", or
+    /// "resign" — to the live record as `color`'s move, then re-render. A vertex
+    /// or "pass" appends a move; "resign" ends the game by resignation (no move
+    /// appended, so the board keeps the last real position). An unparseable
+    /// vertex degrades to a pass (defensive). Internal — unit-tested without the
+    /// engine via the record-only path.
+    func applyGenMove(vertex: String, for color: GoColor) {
         let up = vertex.uppercased()
-        if up == "PASS" || up == "RESIGN" {
+        if up == "RESIGN" {
+            resignedBy = color
+        } else if up == "PASS" {
             moves.append(.pass(color))
         } else if let pos = GtpAnalysisParser.vertexToPosition(up, size: boardSize) {
             moves.append(.play(color, pos % boardSize, pos / boardSize))
@@ -570,8 +618,8 @@ final class GameState {
         }
         currentPly = moves.count   // live play follows the tip
         generation += 1
+        recordVersion += 1
         refreshFromRecord()
-        await advance()   // chain AI-vs-AI or refresh human-turn analysis
     }
 
     /// Stream analysis for the current position: repeatedly read one report,
@@ -585,7 +633,7 @@ final class GameState {
         let gen = generation
         let task = Task { @MainActor in
             while self.analysisEnabled, !Task.isCancelled, gen == self.generation {
-                guard let parsed = await session.analyzeOnce(interval: 20, maxMoves: analysisMaxMoves, timeout: 20) else {
+                guard let parsed = await session.analyzeOnce(size: boardSize, interval: 20, maxMoves: analysisMaxMoves, timeout: 20) else {
                     break   // timeout/error: stop rather than hot-spin
                 }
                 guard gen == self.generation, !Task.isCancelled else { return }
@@ -604,11 +652,10 @@ final class GameState {
         let area = boardSize * boardSize
         let blackToMove = sideToMove == .black
         // Engine emits winrate/lead from White's perspective; convert to to-move.
-        let rootWhiteWin = a.rootWinrateWhite ?? 0.5
-        let winToMove = blackToMove ? (1 - rootWhiteWin) : rootWhiteWin
+        let win = WinProb.fromWhite(a.rootWinrateWhite ?? 0.5, blackToMove: blackToMove)
         let whiteLead = a.rootScoreLeadWhite ?? 0
         return NNResult(candidates: NNResult.candidates(from: a.candidates, blackToMove: blackToMove),
-                        winProbToMove: winToMove,
+                        winProbToMove: win.toMove,
                         noResultProb: 0,
                         whiteScoreMean: whiteLead,
                         whiteLead: whiteLead,
@@ -616,8 +663,8 @@ final class GameState {
     }
 
     private func analysisSummary(_ a: GtpAnalysis) -> String {
-        let blackWin = sideToMove == .black ? (1 - (a.rootWinrateWhite ?? 0.5)) : (a.rootWinrateWhite ?? 0.5)
-        let pct = Int((blackWin * 100).rounded())
+        let win = WinProb.fromWhite(a.rootWinrateWhite ?? 0.5, blackToMove: sideToMove == .black)
+        let pct = Int((win.black * 100).rounded())
         let leadStr = String(format: "%+.1f", a.rootScoreLeadWhite ?? 0)
         let visits = a.rootVisits ?? 0
         return "B \(pct)%  ·  W lead \(leadStr)  ·  \(visits) visits"
@@ -643,10 +690,20 @@ final class GameState {
         let flips = currentPly % 2 == 1
         sideToMove = (baseIsWhite != flips) ? .white : .black
 
-        // Game over: two consecutive passes at the live tip (area rules).
-        gameOver = detectGameOver()
-        gameResultText = nil
-        if gameOver { Task { await computeResult() } }
+        // Game over at the live tip: a resignation, or two consecutive passes
+        // (area rules). Resignation has an immediate result; passes need the
+        // engine to score.
+        let atTip = currentPly == moves.count
+        if atTip, let loser = resignedBy {
+            gameOver = true
+            gameResultText = Self.resignationResult(loser: loser)
+            sgfResultCode = loser == .black ? "W+R" : "B+R"
+        } else {
+            gameOver = detectGameOver()
+            gameResultText = nil
+            sgfResultCode = nil
+            if gameOver { Task { await computeResult() } }
+        }
     }
 
     private func detectGameOver() -> Bool {
@@ -654,13 +711,21 @@ final class GameState {
         return moves[moves.count - 1].isPass && moves[moves.count - 2].isPass
     }
 
-    /// Ask the engine for the final score once the game ends.
+    /// Ask the engine for the final score once a game ends by two passes.
     private func computeResult() async {
         guard modelReady else { return }
         let reply = await session.command("final_score")
         guard reply.ok, let text = reply.lines.first else { return }
-        gameResultText = Self.humanResult(text)
+        let code = text.trimmingCharacters(in: .whitespaces)
+        sgfResultCode = code           // already SGF-format ("B+3.5"/"W+2.5"/"0")
+        gameResultText = Self.humanResult(code)
         statusMessage = gameResultText ?? "Game over"
+    }
+
+    /// Result text for a game ended by resignation (the winner is the opponent
+    /// of `loser`).
+    static func resignationResult(loser: GoColor) -> String {
+        loser == .black ? "White wins by resignation" : "Black wins by resignation"
     }
 
     /// Turn a GTP `final_score` reply ("B+3.5", "W+2.5", "0") into display text.

@@ -25,7 +25,6 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) int lastMoveY;
 @property (nonatomic, readonly) int blackCaptures;
 @property (nonatomic, readonly) int whiteCaptures;
-- (GoColor)colorAtX:(int)x y:(int)y NS_SWIFT_NAME(color(atX:y:));
 @end
 
 /// Pure functions that replay a move list into board positions. No engine, no

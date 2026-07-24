@@ -23,9 +23,6 @@ struct RootView: View {
     @State private var showNewGame = false
     /// App appearance (system/light/dark), shared with the Settings picker.
     @AppStorage("appTheme") private var themeRaw = AppTheme.system.rawValue
-    /// Suppresses autosave while we're loading a game into GameState (loading
-    /// mutates the same state that would otherwise trigger a write-back).
-    @State private var loading = false
     /// Skips the load-on-select when we've just created + configured a game.
     @State private var suppressLoad = false
 
@@ -47,8 +44,9 @@ struct RootView: View {
         .preferredColorScheme(AppTheme(rawValue: themeRaw)?.colorScheme)
         .task { ensureSelection() }
         .onChange(of: selection) { _, newValue in load(newValue) }
-        .onChange(of: game.totalMoves) { _, _ in persist() }
-        .onChange(of: game.gameOver) { _, _ in persist() }
+        // recordVersion bumps on every persistable change — played moves,
+        // resignation, and 0-move edits (commit/import) that totalMoves misses.
+        .onChange(of: game.recordVersion) { _, _ in persist() }
         .sheet(isPresented: $showNewGame) {
             NewGameView(config: currentConfig) { config in startNewGame(config) }
         }
@@ -98,19 +96,26 @@ struct RootView: View {
     private func load(_ saved: SavedGame?) {
         if suppressLoad { suppressLoad = false; return }
         guard let saved else { return }
-        loading = true
         game.importSGF(saved.sgf,
                        koRule: KoRule(rawValue: saved.koRuleRaw),
                        scoringRule: ScoringRule(rawValue: saved.scoringRuleRaw))
-        loading = false
     }
 
+    /// Write the live game back to its saved row. No-ops when the SGF and rules
+    /// already match, so the load-triggered recordVersion bump (and any
+    /// idempotent change) doesn't churn `updatedAt` or fight the library sort.
     private func persist() {
-        guard !loading, let saved = selection else { return }
-        saved.sgf = game.exportSGF()
+        guard let saved = selection else { return }
+        let sgf = game.exportSGF()
+        let ko = game.koRule.rawValue
+        let scoring = game.scoringRule.rawValue
+        guard saved.sgf != sgf || saved.koRuleRaw != ko || saved.scoringRuleRaw != scoring else {
+            return
+        }
+        saved.sgf = sgf
         saved.moveCount = game.totalMoves
-        saved.koRuleRaw = game.koRule.rawValue
-        saved.scoringRuleRaw = game.scoringRule.rawValue
+        saved.koRuleRaw = ko
+        saved.scoringRuleRaw = scoring
         saved.updatedAt = Date()
     }
 }

@@ -96,7 +96,8 @@ Implemented on the current architecture (no P0 dependency).
   ply counter, win-rate bar. Bridge: `snapshot(atPly:)`.
 - ✅ **A2. SGF import/export** — custom Swift SGF codec (`SGF.swift`), main-line
   parse, Share sheet + file importer. *(native KataGo SGF swaps in at P0.)*
-- ✅ **A3. Local game library** — SwiftData (`SavedGame`), split-view list,
+- ✅ **A3. Local game library** — SwiftData (`SavedGame`), a bottom tab bar
+  (Play / History / Settings; the old split-view sidebar was replaced),
   Canvas thumbnails, autosave, swipe-delete, store-load fallback. No iCloud.
 - ✅ **A4a. Rules/komi + players + New Game sheet** — ko/scoring pickers,
   komi stepper, per-side Human/AI; rules persisted on `SavedGame`. Bridge:
@@ -141,7 +142,10 @@ Implemented on the current architecture (no P0 dependency).
   **board editor** for tap-to-correct before commit. Photos (`PhotosPicker`) +
   in-app camera (`AVCaptureSession`, `NSCameraUsageDescription`). The reference's
   OpenCV `GobanRecogKit` C++ port is deferred; the `BoardRecognizer` protocol lets
-  it drop in later without UI changes. *(remaining: OpenCV port for accuracy)*
+  it drop in later without UI changes. Two modes: **Whole Board** and **Fragment**
+  — a cropped partial-board photo (`FragmentBoardRecognizer` / `FragmentAnalysis`
+  / `RecognizedFragment` / `CropView`) is anchored onto a full board for corner
+  studies. *(remaining: OpenCV port for accuracy)*
 - ✅ **Free board editor** — hand-place any position (Black/White/Erase +
   side-to-move) and play/analyze it as a puzzle. Built on the setup-position
   foundation below; engine-free while editing, commits via `loadsgf`.
